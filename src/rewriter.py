@@ -1,0 +1,417 @@
+import re
+import urllib.parse
+
+
+def _build_url_index(all_routes: dict) -> dict:
+    """
+    Build a lookup index that maps multiple URL variations to the same
+    archived route, enabling fuzzy matching for resources that reference
+    different URL forms (protocol-relative, path-only, with/without trailing slash).
+    
+    Returns: dict mapping normalized URL variants -> original URL (orig_url)
+    """
+    index = {}
+    for url in all_routes:
+        # Original URL (exact match — highest priority)
+        index[url] = url
+
+        parsed = urllib.parse.urlparse(url)
+
+        # Without query string
+        no_query = urllib.parse.urlunparse((parsed.scheme, parsed.netloc, parsed.path, "", "", ""))
+        if no_query != url:
+            index.setdefault(no_query, url)
+
+        # Protocol-relative form: //domain/path
+        proto_rel = f"//{parsed.netloc}{parsed.path}"
+        index.setdefault(proto_rel, url)
+
+        # Path-only form: /path  (for same-origin resources)
+        if parsed.path:
+            index.setdefault(parsed.path, url)
+
+    return index
+
+
+def rewrite_css(css_text: str, all_routes: dict, base_url: str = "") -> str:
+    """
+    Rewrite url(...) and @import inside CSS content to point to Wayback local proxies.
+    """
+    url_index = _build_url_index(all_routes)
+
+    def resolve(url: str) -> str:
+        if url.startswith("//"):
+            scheme = urllib.parse.urlparse(base_url).scheme if base_url else "https"
+            return f"{scheme}:{url}"
+        if base_url and not url.startswith(("http://", "https://", "data:", "#")):
+            return urllib.parse.urljoin(base_url, url)
+        return url
+
+    def maybe_rewrite(url: str) -> str:
+        if url.startswith(("data:", "#", "javascript:", "mailto:", "tel:")):
+            return url
+
+        resolved = resolve(url)
+
+        # 1. Try exact match on the resolved URL
+        if resolved in all_routes:
+            return "/__wb/" + urllib.parse.quote(resolved, safe="")
+
+        # 2. Try the fuzzy URL index (protocol-relative, path-only, etc.)
+        if resolved in url_index:
+            return "/__wb/" + urllib.parse.quote(url_index[resolved], safe="")
+
+        # 3. Try matching just the original (un-resolved) URL in the index
+        if url in url_index:
+            return "/__wb/" + urllib.parse.quote(url_index[url], safe="")
+
+        return url
+
+    def replace_css_url(m: re.Match) -> str:
+        inner = m.group(1).strip()
+        # Handle HTML-entity-encoded quotes: url(&quot;...&quot;)
+        if inner.startswith('&quot;') and inner.endswith('&quot;'):
+            url = inner[6:-6]
+            rewritten = maybe_rewrite(url)
+            return f'url(&quot;{rewritten}&quot;)'
+        # Extract url from quotes if present
+        if inner and inner[0] in ('"', "'") and inner[-1] == inner[0]:
+            quote = inner[0]
+            url = inner[1:-1]
+            rewritten = maybe_rewrite(url)
+            return f"url({quote}{rewritten}{quote})"
+        else:
+            rewritten = maybe_rewrite(inner)
+            return f"url({rewritten})"
+
+    def replace_import(m: re.Match) -> str:
+        """Handle @import url('...') and @import '...' """
+        url = m.group(1) or m.group(2)
+        if url:
+            rewritten = maybe_rewrite(url)
+            if m.group(1):  # @import url(...) form
+                return f'@import url("{rewritten}")'
+            else:  # @import "..." form
+                return f'@import "{rewritten}"'
+        return m.group(0)
+
+    # Match @import url(...) and @import "..."
+    css_text = re.sub(
+        r'@import\s+(?:url\(\s*["\']?([^"\')\s]+)["\']?\s*\)|["\']([^"\']+)["\'])',
+        replace_import, css_text, flags=re.IGNORECASE
+    )
+
+    # Match url(...)
+    css_text = re.sub(r'url\(\s*([^)]+?)\s*\)', replace_css_url, css_text, flags=re.IGNORECASE)
+    return css_text
+
+
+def rewrite_html(html: str, all_routes: dict, base_url: str = "") -> str:
+    """
+    Rewrite all href/src/action/srcset/data-src attributes that point to
+    archived URLs so the replay server can serve them locally.
+
+    Also:
+    - Injects a <base> tag so relative URLs resolve correctly
+    - Swaps lazy-load attributes to standard src for offline rendering
+    - Rewrites inline CSS url() references
+    - Rewrites <style> blocks
+    """
+    url_index = _build_url_index(all_routes)
+
+    # 0. Inject SPA routing helper script into the head to support client-side routers
+    spa_script = """<script>
+(function() {
+  try {
+    var originalPathname = Object.getOwnPropertyDescriptor(Location.prototype, 'pathname');
+    var originalHref = Object.getOwnPropertyDescriptor(Location.prototype, 'href');
+    var originalOrigin = Object.getOwnPropertyDescriptor(Location.prototype, 'origin');
+    var originalHost = Object.getOwnPropertyDescriptor(Location.prototype, 'host');
+    var originalHostname = Object.getOwnPropertyDescriptor(Location.prototype, 'hostname');
+    
+    window.__wr_path = function() {
+      var p = originalPathname.get.call(window.location);
+      if (p.indexOf('/__wb/') === 0) {
+        var nextSlash = p.indexOf('/', 6);
+        if (nextSlash === -1) return '/';
+        return p.substring(nextSlash) || '/';
+      }
+      return p;
+    };
+    
+    window.__wr_href = function() {
+      var h = originalHref.get.call(window.location);
+      var idx = h.indexOf('/__wb/');
+      if (idx !== -1) {
+        var rest = h.substring(idx + 6);
+        var nextSlash = rest.indexOf('/');
+        var targetUrl = decodeURIComponent(nextSlash === -1 ? rest : rest.substring(0, nextSlash));
+        if (nextSlash !== -1) {
+          targetUrl += rest.substring(nextSlash);
+        }
+        return targetUrl;
+      }
+      return h;
+    };
+    
+    window.__wr_origin = function() {
+      try { return new URL(window.__wr_href()).origin; } 
+      catch(e) { return originalOrigin.get.call(window.location); }
+    };
+    
+    window.__wr_host = function() {
+      try { return new URL(window.__wr_href()).host; } 
+      catch(e) { return originalHost.get.call(window.location); }
+    };
+  
+    window.__wr_hostname = function() {
+      try { return new URL(window.__wr_href()).hostname; } 
+      catch(e) { return originalHostname.get.call(window.location); }
+    };
+  
+    Object.defineProperty(Location.prototype, 'pathname', {
+      get: window.__wr_path,
+      set: function(val) { originalPathname.set.call(window.location, val); },
+      configurable: true
+    });
+    
+    Object.defineProperty(Location.prototype, 'href', {
+      get: window.__wr_href,
+      set: function(val) { originalHref.set.call(window.location, val); },
+      configurable: true
+    });
+    
+    Object.defineProperty(Location.prototype, 'origin', {
+      get: window.__wr_origin,
+      configurable: true
+    });
+    
+    Object.defineProperty(Location.prototype, 'host', {
+      get: window.__wr_host,
+      set: function(val) { originalHost.set.call(window.location, val); },
+      configurable: true
+    });
+    
+    Object.defineProperty(Location.prototype, 'hostname', {
+      get: window.__wr_hostname,
+      set: function(val) { originalHostname.set.call(window.location, val); },
+      configurable: true
+    });
+  
+    Object.defineProperty(document, 'URL', {
+      get: window.__wr_href,
+      configurable: true
+    });
+    
+    var originalPushState = history.pushState;
+    var originalReplaceState = history.replaceState;
+    function wrapStateMethod(original) {
+      return function(state, unused, url) {
+        if (url) {
+          var currentWb = '';
+          var p = originalPathname.get.call(window.location);
+          if (p.indexOf('/__wb/') === 0) {
+            var nextSlash = p.indexOf('/', 6);
+            currentWb = nextSlash === -1 ? p : p.substring(0, nextSlash);
+          }
+          if (currentWb) {
+            if (url.indexOf('/') === 0) {
+              url = currentWb + url;
+            } else if (url.indexOf('http://') !== 0 && url.indexOf('https://') !== 0) {
+              var cleanPath = window.__wr_path();
+              var base = cleanPath.substring(0, cleanPath.lastIndexOf('/') + 1);
+              url = currentWb + base + url;
+            } else {
+              url = currentWb.substring(0, 5) + '/' + encodeURIComponent(url);
+            }
+          }
+        }
+        return original.apply(this, [state, unused, url]);
+      };
+    }
+    history.pushState = wrapStateMethod(originalPushState);
+    history.replaceState = wrapStateMethod(originalReplaceState);
+  } catch(e) {}
+})();
+</script>"""
+
+    if "<head>" in html:
+        html = html.replace("<head>", f"<head>{spa_script}", 1)
+    elif "<HEAD>" in html:
+        html = html.replace("<HEAD>", f"<HEAD>{spa_script}", 1)
+    else:
+        html = f"{spa_script}{html}"
+
+    def resolve(url: str) -> str:
+        """Resolve a possibly-relative URL against base_url."""
+        if url.startswith("//"):
+            scheme = urllib.parse.urlparse(base_url).scheme if base_url else "https"
+            return f"{scheme}:{url}"
+        if base_url and not url.startswith(("http://", "https://", "data:", "#")):
+            return urllib.parse.urljoin(base_url, url)
+        return url
+
+    def maybe_rewrite(url: str) -> str:
+        """Return /__wb/<encoded> if url is in archive, else original url."""
+        if url.startswith(("data:", "#", "javascript:", "mailto:", "tel:")):
+            return url
+
+        resolved = resolve(url)
+
+        # 1. Exact match on resolved URL
+        if resolved in all_routes:
+            return "/__wb/" + urllib.parse.quote(resolved, safe="")
+
+        # 2. Fuzzy match via URL index
+        if resolved in url_index:
+            return "/__wb/" + urllib.parse.quote(url_index[resolved], safe="")
+
+        # 3. Match un-resolved URL
+        if url in url_index:
+            return "/__wb/" + urllib.parse.quote(url_index[url], safe="")
+
+        return url
+
+    def replace_attr(m: re.Match) -> str:
+        attr, q, url = m.group(1), m.group(2), m.group(3)
+        return f'{attr}={q}{maybe_rewrite(url)}{q}'
+
+    def replace_srcset(m: re.Match) -> str:
+        """Handle srcset="url1 2x, url2 1x" — each comma-separated candidate."""
+        attr, q, srcset = m.group(1), m.group(2), m.group(3)
+        parts = srcset.split(",")
+        rewritten = []
+        for part in parts:
+            tokens = part.strip().split()
+            if tokens:
+                tokens[0] = maybe_rewrite(tokens[0])
+            rewritten.append(" ".join(tokens))
+        return f'{attr}={q}{", ".join(rewritten)}{q}'
+
+    def replace_css_url(m: re.Match) -> str:
+        """Handle CSS url("...") / url('...') / url(...) references."""
+        inner = m.group(1).strip()
+        # Handle HTML-entity-encoded quotes: url(&quot;...&quot;)
+        if inner.startswith('&quot;') and inner.endswith('&quot;'):
+            url = inner[6:-6]
+            rewritten = maybe_rewrite(url)
+            return f'url(&quot;{rewritten}&quot;)'
+        # Standard quoted URLs
+        if inner and inner[0] in ('"', "'") and inner[-1] == inner[0]:
+            quote = inner[0]
+            url = inner[1:-1]
+            rewritten = maybe_rewrite(url)
+            return f"url({quote}{rewritten}{quote})"
+        else:
+            rewritten = maybe_rewrite(inner)
+            return f"url({rewritten})"
+
+    def rewrite_style_block(m: re.Match) -> str:
+        """Rewrite URLs inside <style>...</style> blocks."""
+        open_tag = m.group(1)
+        css_content = m.group(2)
+        close_tag = m.group(3)
+        rewritten_css = re.sub(r'url\(\s*([^)]+?)\s*\)', replace_css_url, css_content, flags=re.IGNORECASE)
+        return f"{open_tag}{rewritten_css}{close_tag}"
+
+    # NOTE: Do NOT inject <base> tag — it breaks all rewritten /__wb/ URLs
+    # by resolving them against the original domain (e.g. https://docln.net/__wb/...)
+    # instead of localhost:8080/__wb/... . Un-rewritten relative URLs are handled
+    # by the server's referer-based fallback routing instead.
+
+    # 1. Standard attribute rewrites (src, href, action, data-src, etc.)
+    html = re.sub(
+        r'(src|href|action|data-src|data-original|data-lazy-src|data-lazy|poster|data-bg|data-background)=(["\'])([^"\']{4,})\2',
+        replace_attr, html, flags=re.IGNORECASE
+    )
+
+    # 2. srcset / data-srcset attribute
+    html = re.sub(
+        r'(srcset|data-srcset)=(["\'])([^"\']+)\2',
+        replace_srcset, html, flags=re.IGNORECASE
+    )
+
+    # 3. Rewrite URLs inside <style>...</style> blocks (full CSS parsing)
+    html = re.sub(
+        r'(<style[^>]*>)(.*?)(</style>)',
+        rewrite_style_block, html, flags=re.IGNORECASE | re.DOTALL
+    )
+
+    # 4. CSS url() in inline style attributes
+    # BUG FIX: The old regex only caught the FIRST url() per style attribute.
+    # New approach: find each style="..." attribute, extract the value, and run
+    # the full CSS url() rewriter on it — this catches ALL url() calls.
+    def rewrite_inline_style(m: re.Match) -> str:
+        prefix = m.group(1)  # 'style=' or 'style ='
+        quote = m.group(2)   # the delimiter (' or ")
+        value = m.group(3)   # the style attribute value
+        # Rewrite all url() inside this style value
+        rewritten = re.sub(r'url\(\s*([^)]+?)\s*\)', replace_css_url, value, flags=re.IGNORECASE)
+        return f'{prefix}{quote}{rewritten}{quote}'
+
+    html = re.sub(
+        r'(style\s*=\s*)(["\'])(.*?)\2',
+        rewrite_inline_style, html, flags=re.IGNORECASE | re.DOTALL
+    )
+
+    # 5. FIX: Swap lazy-load images on <img> tags to render immediately offline
+    def fix_lazy_images(m: re.Match) -> str:
+        img_tag = m.group(0)
+        lazy_url = None
+        # Look for standard lazy loading attributes
+        for attr in ("data-src", "data-original", "data-lazy-src", "data-lazy"):
+            pat = rf'{attr}=(["\'])(.*?)\1'
+            lazy_match = re.search(pat, img_tag, re.IGNORECASE)
+            if lazy_match:
+                lazy_url = lazy_match.group(2)
+                break
+
+        if lazy_url:
+            rewritten_lazy = maybe_rewrite(lazy_url)
+            if re.search(r'\bsrc=', img_tag, re.IGNORECASE):
+                # Check if existing src is a placeholder (tiny, blank, or data URI)
+                existing_src = re.search(r'src=["\']([^"\']*)["\']', img_tag, re.IGNORECASE)
+                if existing_src:
+                    existing = existing_src.group(1)
+                    is_placeholder = (
+                        not existing or
+                        existing.startswith("data:") or
+                        "blank" in existing.lower() or
+                        "placeholder" in existing.lower() or
+                        "1x1" in existing or
+                        len(existing) < 10
+                    )
+                    if is_placeholder:
+                        img_tag = re.sub(
+                            r'src=(["\']).*?\1',
+                            f'src="{rewritten_lazy}"',
+                            img_tag,
+                            count=1,
+                            flags=re.IGNORECASE
+                        )
+            else:
+                # No src attribute — add one
+                img_tag = img_tag.replace("<img ", f'<img src="{rewritten_lazy}" ', 1)
+
+            # Remove loading="lazy" since we want immediate rendering offline
+            img_tag = re.sub(r'\s*loading=["\']lazy["\']', '', img_tag, flags=re.IGNORECASE)
+
+        return img_tag
+
+    html = re.sub(r'<img\s+[^>]*/?>', fix_lazy_images, html, flags=re.IGNORECASE)
+
+    # 6. Normalize charset meta tags to UTF-8 to prevent browsers from rendering garbled text
+    html = re.sub(
+        r'<meta\s+charset=["\']?(?:gbk|gb2312|gb18030|big5|iso-8859-1|windows-1252)["\']?\s*/?>',
+        '<meta charset="utf-8">',
+        html,
+        flags=re.IGNORECASE
+    )
+    html = re.sub(
+        r'(<meta\s+http-equiv=["\']content-type["\']\s+content=["\']text/html;\s*charset=)(?:gbk|gb2312|gb18030|big5|iso-8859-1|windows-1252)(["\']\s*/?>)',
+        r'\1utf-8\2',
+        html,
+        flags=re.IGNORECASE
+    )
+
+    return html
