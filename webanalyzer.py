@@ -83,6 +83,45 @@ class OfflinePatcher:
             r'(src|href|action)=(["\'])([^"\']+)\2',
             replace_attr, html, flags=re.IGNORECASE
         )
+        
+        # Strip meta refresh to prevent redirect loops, accounting for arbitrary attribute order
+        html = re.sub(
+            r'<meta\s+(?:[^>]*?\s+)?http-equiv=["\']?refresh["\']?[^>]*>',
+            '',
+            html,
+            flags=re.IGNORECASE
+        )
+        
+        # Inject anti-refresh script
+        anti_refresh = """<script>
+        (function(){
+            var safeDefine = function(obj, prop, desc) { try { Object.defineProperty(obj, prop, desc); } catch(e) {} };
+            safeDefine(document, 'domain', { get: function() { return window.location.hostname; }, configurable: true });
+            safeDefine(window, 'origin', { get: function() { return window.location.origin; }, configurable: true });
+            safeDefine(Location.prototype, 'href', { set: function(u) { console.warn('Blocked href: ' + u); }, configurable: true });
+            safeDefine(Location.prototype, 'pathname', { set: function(u) { console.warn('Blocked pathname: ' + u); }, configurable: true });
+            safeDefine(Location.prototype, 'search', { set: function(u) { console.warn('Blocked search: ' + u); }, configurable: true, get: function() { return ''; } });
+            safeDefine(Location.prototype, 'protocol', { set: function(u) { console.warn('Blocked protocol: ' + u); }, configurable: true, get: function() { return 'http:'; } });
+            safeDefine(Location.prototype, 'port', { set: function(u) { console.warn('Blocked port: ' + u); }, configurable: true, get: function() { return ''; } });
+            safeDefine(Location.prototype, 'hash', { set: function(u) { console.warn('Blocked hash: ' + u); }, configurable: true, get: function() { return ''; } });
+            safeDefine(Location.prototype, 'reload', { value: function() { console.warn('Blocked reload'); }, configurable: true });
+            safeDefine(Location.prototype, 'replace', { value: function(u) { console.warn('Blocked replace: ' + u); }, configurable: true });
+            safeDefine(Location.prototype, 'assign', { value: function(u) { console.warn('Blocked assign: ' + u); }, configurable: true });
+            try {
+                var originalGo = history.go;
+                history.go = function(delta) { if (delta === 0 || delta === undefined) { console.warn('Blocked history.go'); return; } return originalGo.apply(this, arguments); };
+            } catch(e) {}
+            try { if ('serviceWorker' in navigator) { safeDefine(navigator, 'serviceWorker', { get: function() { return undefined; }, configurable: true }); } } catch(e) {}
+            window.addEventListener('beforeunload', function(e) { e.preventDefault(); e.returnValue = 'Blocked'; return 'Blocked'; });
+        })();
+        </script>"""
+        if "<head>" in html:
+            html = html.replace("<head>", f"<head>{anti_refresh}", 1)
+        elif "<HEAD>" in html:
+            html = html.replace("<HEAD>", f"<HEAD>{anti_refresh}", 1)
+        else:
+            html = f"{anti_refresh}{html}"
+            
         return html
 
     def patch_all(self):

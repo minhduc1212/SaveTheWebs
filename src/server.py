@@ -508,6 +508,63 @@ loadData();
 </html>
 """
 
+SW_JS = r"""// Service Worker for WebRecorder Replay
+self.addEventListener('install', event => {
+  self.skipWaiting();
+});
+
+self.addEventListener('activate', event => {
+  event.waitUntil(self.clients.claim());
+});
+
+self.addEventListener('fetch', event => {
+  const url = new URL(event.request.url);
+  
+  // Bỏ qua các request đến hệ thống của archive
+  if (url.origin === self.location.origin) {
+    if (url.pathname.startsWith('/__archive__') || 
+        url.pathname.startsWith('/__wb/') || 
+        url.pathname.startsWith('/__mhtml/') || 
+        url.pathname === '/sw.js') {
+      return; // Để server tự xử lý
+    }
+  }
+
+  // Chặn request và chuyển hướng vào proxy /__wb/
+  event.respondWith((async () => {
+    const client = await clients.get(event.clientId);
+    let targetUrl = event.request.url;
+
+    if (url.origin === self.location.origin) {
+       if (client && client.url) {
+         const clientUrl = new URL(client.url);
+         if (clientUrl.pathname.startsWith('/__wb/')) {
+            let pageUrlEncoded = clientUrl.pathname.substring(6) + clientUrl.search + clientUrl.hash;
+            let pageUrl = decodeURIComponent(pageUrlEncoded);
+            targetUrl = new URL(url.pathname + url.search + url.hash, pageUrl).href;
+         }
+       }
+    }
+
+    const proxyUrl = self.location.origin + '/__wb/' + encodeURIComponent(targetUrl);
+    
+    const requestArgs = {
+      method: event.request.method,
+      headers: event.request.headers,
+      mode: 'cors',
+      credentials: 'omit',
+      redirect: 'manual'
+    };
+    
+    if (event.request.method !== 'GET' && event.request.method !== 'HEAD') {
+        try { requestArgs.body = await event.request.clone().blob(); } catch(e) {}
+    }
+    
+    return fetch(proxyUrl, requestArgs);
+  })());
+});
+"""
+
 
 class WaybackServer:
     """
@@ -579,9 +636,32 @@ class WaybackServer:
                     encoded = path[6:].split("?")[0]
                     try:
                         url = urllib.parse.unquote(encoded)
+                        # Strip query params from the decoded URL for tracking
+                        base_url = url.split("?")[0]
                     except Exception:
                         self._404(path)
                         return
+                    # Anti-Loop Mechanism: Detects A->B->A or self-reload loops
+                    import time
+                    if not hasattr(self.server, 'nav_history'):
+                        self.server.nav_history = {}
+                        
+                    # Use the base URL for tracking to catch query-param loops
+                    client_ip = self.client_address[0]
+                    history_key = f"{client_ip}_{base_url}"
+                    now = time.time()
+                    
+                    history = self.server.nav_history.get(history_key, [])
+                    history = [t for t in history if now - t < 5]
+                    history.append(now)
+                    self.server.nav_history[history_key] = history
+                    
+                    # If more than 4 requests in 5 seconds to the EXACT same base URL, it's a runaway loop
+                    if len(history) > 4:
+                        log("WARN", f"Blocked infinite redirect/reload loop for {client_ip} at {url}")
+                        self._send(204, "text/plain", b"")
+                        return
+
                     self._serve_url(url)
 
                 # ── Root → redirect to dashboard ──────────────────────
@@ -589,6 +669,10 @@ class WaybackServer:
                     self.send_response(302)
                     self.send_header("Location", "/__archive__")
                     self.end_headers()
+
+                # ── Service Worker ────────────────────────────────────
+                elif path == "/sw.js":
+                    self._serve_sw()
 
                 else:
                     # Referer-based fallback routing (leak correction)
@@ -623,6 +707,12 @@ class WaybackServer:
                 body = DASHBOARD_HTML.encode("utf-8")
                 self._send(200, "text/html; charset=utf-8", body,
                            extra_headers={"Cache-Control": "no-cache"})
+
+            def _serve_sw(self):
+                body = SW_JS.encode("utf-8")
+                self._send(200, "application/javascript; charset=utf-8", body,
+                           extra_headers={"Service-Worker-Allowed": "/", "Cache-Control": "no-cache"})
+
 
             def _api(self, sub: str):
                 if sub == "snapshots":
@@ -701,10 +791,34 @@ class WaybackServer:
                     api_match = None
                     req_method = self.command.upper()
                     
+                    req_body_str = ""
+                    if req_method in ("POST", "PUT") and self.headers.get("Content-Length"):
+                        try:
+                            length = int(self.headers["Content-Length"])
+                            req_body_str = self.rfile.read(length).decode("utf-8", errors="ignore")
+                        except Exception:
+                            pass
+                    
                     for entry in api_responses:
                         if entry.get("url") == url and entry.get("method", "GET").upper() == req_method:
-                            api_match = entry
-                            break
+                            # If it's a POST, try to match a substring of the body (e.g. GraphQL operation)
+                            rec_body = entry.get("request", {}).get("body", "")
+                            if req_method == "POST" and rec_body and req_body_str:
+                                # For GraphQL, check if the operation name matches
+                                op_match = re.search(r'"operationName"\s*:\s*"([^"]+)"', req_body_str)
+                                rec_op_match = re.search(r'"operationName"\s*:\s*"([^"]+)"', rec_body)
+                                if op_match and rec_op_match:
+                                    if op_match.group(1) == rec_op_match.group(1):
+                                        api_match = entry
+                                        break
+                                else:
+                                    # Fallback to simple substring or exact match if no operationName
+                                    if req_body_str[:100] in rec_body or rec_body[:100] in req_body_str:
+                                        api_match = entry
+                                        break
+                            else:
+                                api_match = entry
+                                break
                     
                     if not api_match:
                         # Path-only match for API
@@ -714,16 +828,44 @@ class WaybackServer:
                             if (entry_parsed.path == req_parsed.path and 
                                 entry_parsed.netloc == req_parsed.netloc and
                                 entry.get("method", "GET").upper() == req_method):
-                                api_match = entry
-                                break
-
+                                
+                                rec_body = entry.get("request", {}).get("body", "")
+                                if req_method == "POST" and rec_body and req_body_str:
+                                    op_match = re.search(r'"operationName"\s*:\s*"([^"]+)"', req_body_str)
+                                    rec_op_match = re.search(r'"operationName"\s*:\s*"([^"]+)"', rec_body)
+                                    if op_match and rec_op_match and op_match.group(1) == rec_op_match.group(1):
+                                        api_match = entry
+                                        break
+                                    elif not op_match and not rec_op_match:
+                                        api_match = entry
+                                        break
+                                else:
+                                    api_match = entry
+                                    break
+                                
                     if api_match:
                         resp = api_match.get("response", {})
                         status = resp.get("status", 200)
                         headers = resp.get("headers", {})
                         body_str = resp.get("body", "")
+                        
+                        # Case-insensitive headers lookup for content-type
+                        ct = "application/json; charset=utf-8"
+                        for k, v in headers.items():
+                            if k.lower() == "content-type":
+                                ct = v
+                                break
+                        
                         body = body_str.encode("utf-8", errors="replace")
-                        ct = headers.get("content-type", "application/json; charset=utf-8")
+                        if "html" in ct.lower():
+                            try:
+                                t_script = _get_tokens_script(url)
+                                # Rewrite HTML content in API response (e.g. swap lazy loaded images)
+                                body_str = rewrite_html(body_str, all_routes, url, tokens_script=t_script, is_final_page=False)
+                                body = body_str.encode("utf-8", errors="replace")
+                            except Exception as e:
+                                log("WARN", f"Failed rewriting API HTML: {e}")
+                                
                         self._send(status, ct, body, extra_headers={
                             "X-WR-Source": f"api_responses/{api_match['id']}.json",
                             "X-WR-OrigURL": url,
@@ -742,13 +884,71 @@ class WaybackServer:
                         "application/json" in accept_hdr
                     )
                     if is_api_req:
-                        stub = json.dumps({"code": 0, "data": None, "msg": "", "result": None,
-                                           "__wr_stub": True}).encode()
+                        if "/graphql" in req_parsed.path:
+                            stub = b'{"data": {}}'
+                        else:
+                            stub = json.dumps({"code": 0, "data": None, "msg": "", "result": None,
+                                            "__wr_stub": True}).encode()
                         self._send(200, "application/json; charset=utf-8", stub, extra_headers={
                             "X-WR-Source": "stub",
                             "X-WR-OrigURL": url,
                         })
                         return
+
+                def _get_tokens_script(req_url: str) -> str:
+                    try:
+                        parsed = urllib.parse.urlparse(req_url)
+                        domain = parsed.netloc.replace(":", "_")
+                        domain_aliases = {domain}
+                        if domain.startswith("www."):
+                            domain_aliases.add(domain[4:])
+                        else:
+                            domain_aliases.add("www." + domain)
+                        
+                        snap_path = None
+                        for s in archive.data["snapshots"]:
+                            if s["domain"] in domain_aliases:
+                                snap_path = archive.root / s["path"]
+                                break
+                        
+                        if not snap_path:
+                            return ""
+                            
+                        cookies = []
+                        cookies_path = snap_path / "tokens" / "cookies.json"
+                        if cookies_path.exists():
+                            try: cookies = json.loads(cookies_path.read_text(encoding="utf-8"))
+                            except Exception: pass
+                            
+                        ls_tokens = []
+                        mf_path = snap_path / "manifest.json"
+                        if mf_path.exists():
+                            try:
+                                mf = json.loads(mf_path.read_text(encoding="utf-8"))
+                                ls_tokens = mf.get("tokens", {}).get("localStorage", [])
+                            except Exception: pass
+                            
+                        if not cookies and not ls_tokens:
+                            return ""
+                            
+                        js = ["<script>(function(){try{"]
+                        for c in cookies:
+                            c_name = c.get('name', '').replace("'", "\\'")
+                            c_val = c.get('value', '').replace("'", "\\'")
+                            c_domain = c.get('domain', '').replace("'", "\\'")
+                            js.append(f"document.cookie='{c_name}={c_val}; domain={c_domain}; path=/';")
+                        for t in ls_tokens:
+                            v = t.get('value', '')
+                            if '=' in v:
+                                key, val = v.split('=', 1)
+                                key = key.replace("'", "\\'").replace("\\", "\\\\").replace("\n", "\\n")
+                                val = val.replace("'", "\\'").replace("\\", "\\\\").replace("\n", "\\n")
+                                js.append(f"localStorage.setItem('{key}', '{val}');")
+                        js.append("}catch(e){}})();</script>")
+                        return "".join(js)
+                    except Exception as e:
+                        log("WARN", f"Failed to load tokens for {req_url}: {e}")
+                        return ""
 
                 # 4. Fallback: serve final_page.html for matching domain
                 # Also handles www. prefix alias (e.g., recorded under qimao.com but
@@ -769,8 +969,11 @@ class WaybackServer:
                             candidate = archive.root / snap["path"] / "final_page.html"
                             if candidate.exists():
                                 html = candidate.read_text(encoding="utf-8", errors="replace")
-                                html = rewrite_html(html, all_routes, snap["url"])
-                                self._send(200, "text/html; charset=utf-8", html.encode("utf-8"))
+                                t_script = _get_tokens_script(url)
+                                html = rewrite_html(html, all_routes, snap["url"], tokens_script=t_script, is_final_page=True)
+                                self._send(200, "text/html; charset=utf-8", html.encode("utf-8"), extra_headers={
+                                    "Content-Security-Policy": "sandbox allow-scripts allow-same-origin allow-popups allow-forms allow-top-navigation-by-user-activation allow-modals"
+                                })
                                 return
 
                 if rel_path and rel_path.startswith("redirect:"):
@@ -805,7 +1008,7 @@ class WaybackServer:
                 if not ct:
                     path_str = str(filepath)
                     if "__q" in path_str:
-                        path_str = path_str.split("__q")[0]
+                        path_str = re.sub(r'__q[a-f0-9]+', '', path_str)
                     ct, _ = mimetypes.guess_type(path_str)
                     
                 ct = (ct or "application/octet-stream").lower()
@@ -814,9 +1017,20 @@ class WaybackServer:
                 # peek at the first few bytes to see if it's actually HTML.
                 # This fixes URLs like `/releases/tag/v1.0.0` being downloaded instead of viewed.
                 if ct == "application/octet-stream":
-                    peek = content[:512].strip().lower()
-                    if peek.startswith(b"<!doctype html") or peek.startswith(b"<html"):
+                    peek = content[:1024].strip()
+                    peek_lower = peek.lower()
+                    if peek_lower.startswith(b"<!doctype html") or peek_lower.startswith(b"<html"):
                         ct = "text/html; charset=utf-8"
+                    elif peek_lower.startswith(b"<svg") or b"<svg" in peek_lower[:100]:
+                        ct = "image/svg+xml"
+                    elif peek.startswith(b"<") and not peek.startswith(b"<?xml"):
+                        ct = "text/html; charset=utf-8"
+                    elif peek.startswith(b"{") or peek.startswith(b"["):
+                        ct = "application/json; charset=utf-8"
+                    elif self.headers.get("Sec-Fetch-Dest") == "script" or "/js/" in parsed_url.path or parsed_url.path.endswith(".mjs"):
+                        ct = "application/javascript"
+                    elif self.headers.get("Sec-Fetch-Dest") == "style" or "/css/" in parsed_url.path:
+                        ct = "text/css"
 
                 def safe_decode(b: bytes) -> str:
                     for enc in ("utf-8", "gb18030", "utf-8-sig"):
@@ -829,8 +1043,10 @@ class WaybackServer:
                 # Rewrite HTML links → /__wb/...
                 if "html" in ct:
                     try:
-                        text = safe_decode(content)
-                        text = rewrite_html(text, all_routes, matched_url)
+                        text = open(filepath, "r", encoding="utf-8", errors="ignore").read()
+                        t_script = _get_tokens_script(url)
+                        is_final = "final_page.html" in str(filepath)
+                        text = rewrite_html(text, all_routes, matched_url, tokens_script=t_script, is_final_page=is_final)
                         content = text.encode("utf-8")
                     except Exception:
                         pass
@@ -865,12 +1081,18 @@ class WaybackServer:
                     if "charset" not in ct:
                         ct = f"{ct}; charset=utf-8"
 
-                self._send(200, ct, content, extra_headers={
+                extra_hdrs = {
                     "X-WR-Source": rel_path,
                     "X-WR-OrigURL": url,
                     # PERF: Cache static assets aggressively in browser
                     "Cache-Control": "public, max-age=3600" if ("html" not in ct and "css" not in ct) else "no-cache",
-                })
+                }
+                
+                # Add Sandbox CSP to prevent JS from auto-refreshing or auto-redirecting (stops WAF loops)
+                if "html" in ct:
+                    extra_hdrs["Content-Security-Policy"] = "sandbox allow-scripts allow-same-origin allow-popups allow-forms allow-top-navigation-by-user-activation allow-modals"
+
+                self._send(200, ct, content, extra_headers=extra_hdrs)
 
             def _archive_not_found(self, url: str):
                 body = f"""<!DOCTYPE html><html><head><meta charset=UTF-8>

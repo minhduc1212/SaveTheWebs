@@ -138,7 +138,28 @@ class ArchiveIndex:
                 if rel.startswith("redirect:"):
                     routes[url] = rel
                 else:
-                    routes[url] = str(Path(snap["path"]) / rel)
+                    routes[url] = str(Path(snap["path"]) / rel).replace("\\", "/")
+
+        # WAF Bypass: Cloudflare redirects to ?solution=...&js_challenge=1 when solved,
+        # and returns the real page on that URL. We map the clean base URL to the real page.
+        waf_mapping = {}
+        for url, path in routes.items():
+            if "js_challenge=1" in url or "solution=" in url:
+                base_url = url.split("?")[0]
+                waf_mapping[base_url] = path
+                
+        for base_url, path in waf_mapping.items():
+            routes[base_url] = path
+
+        # ALWAYS prioritize final_page.html for the snapshot's main URL across ALL snapshots
+        # This completely bypasses WAF challenges and blank SPA shells for the entry page.
+        # It must be at the very end to override any WAF mappings.
+        for snap in self.data["snapshots"]:
+            if "url" in snap:
+                final_page_path = self.root / snap["path"] / "final_page.html"
+                if final_page_path.exists():
+                    routes[snap["url"]] = str(Path(snap["path"]) / "final_page.html").replace("\\", "/")
+
         self._routes_cache = routes
         return routes
 
