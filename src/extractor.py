@@ -6,7 +6,7 @@ content data (metadata, navigation, content sections, images, links, assets)
 into a JSON file.
 
 Supports both flat extraction (for backwards compatibility and markdown generation)
-and a new hierarchical area-based extraction mode that preserves the nested structure
+and a hierarchical area-based extraction mode that preserves the nested structure
 of DOM components (e.g. associating book covers, titles, descriptions, and metadata).
 
 Usage:
@@ -22,7 +22,7 @@ import re
 from pathlib import Path
 from urllib.parse import urljoin, urlparse
 
-from bs4 import BeautifulSoup, Tag, NavigableString
+from bs4 import BeautifulSoup, Comment, Tag, NavigableString
 
 from src.utils import log
 
@@ -43,17 +43,67 @@ _CONTENT_SELECTORS = [
     ".entry-content", ".page-content", ".post-body",
     "#content", "#main", "#main-content",
     "section",
+    "[class*='-mod']", "[class*='mod-']",
+    "[class*='-list']", "[class*='list-']",
+    "[class*='-card']", "[class*='card-']",
+    "[class*='-block']", "[class*='block-']",
 ]
 
-_LAYOUT_CLASSES = {
-    "row", "col", "grid", "container", "clearfix", "d-flex", "flex", 
-    "active", "hide", "show", "visible", "invisible", "disabled"
-}
+# Tags that never contain meaningful content
+_SKIP_TAGS = frozenset({
+    "script", "style", "noscript", "iframe", "svg", "canvas",
+    "br", "hr", "link", "meta", "template", "input", "select",
+    "textarea", "button", "form", "label",
+})
 
-_IMG_EXTS = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".avif", ".svg", ".bmp", ".ico", ".tiff"}
-_FONT_EXTS = {".woff", ".woff2", ".ttf", ".otf", ".eot"}
-_CSS_EXTS = {".css"}
-_JS_EXTS = {".js"}
+# Keywords in class/id that indicate non-content regions
+_SKIP_KEYWORDS = frozenset({
+    "header", "footer", "nav", "menu", "sidebar", "toolbar",
+    "ad-", "ads-", "advert", "banner", "popup", "modal",
+    "comment-form", "cookie", "analytics", "tracking",
+    "tooltip", "dropdown", "overlay",
+})
+
+# CSS utility classes used as keys should be filtered (not semantic)
+_LAYOUT_CLASSES = frozenset({
+    # Bootstrap / Flexbox / Grid
+    "row", "col", "grid", "container", "clearfix",
+    "d-flex", "d-block", "d-none", "d-inline", "d-grid",
+    "flex", "flex-1", "flex-column", "flex-row", "flex-wrap",
+    "flex-justify-between", "flex-justify-center", "flex-items-center",
+    "justify-content-between", "justify-content-center",
+    "align-items-center", "align-self-center",
+    # Display / Visibility
+    "active", "hide", "show", "hidden", "visible", "invisible", "disabled",
+    "loaded", "collapsed", "expanded", "open", "closed",
+    # Spacing / Sizing (utility patterns)
+    "w-100", "h-100", "w-auto", "h-auto",
+    "position-relative", "position-absolute", "position-fixed",
+    "overflow-hidden", "overflow-auto",
+    # Typography utility
+    "text-center", "text-left", "text-right",
+    "font-bold", "font-normal",
+    # Common generic wrappers
+    "wrapper", "inner", "outer", "main",
+})
+
+# Regex for CSS module hash patterns: `ClassName-module__element__hash`
+_CSS_MODULE_RE = re.compile(r"^[A-Za-z][\w-]*-module__[\w-]+__[\w]+$")
+# Regex for utility classes with numeric suffixes: px-2, mt-3, col-md-6, etc.
+_UTILITY_CLASS_RE = re.compile(
+    r"^(px|py|pt|pb|pl|pr|p|mx|my|mt|mb|ml|mr|m|"
+    r"col|col-\w+|gap|g|w|h|"
+    r"text|font|bg|border|rounded|shadow|opacity|z|"
+    r"top|bottom|left|right|start|end|"
+    r"d|display|position|float|order|"
+    r"overflow|visibility|align|justify|flex)-?\d+",
+    re.I,
+)
+
+_IMG_EXTS = frozenset({".png", ".jpg", ".jpeg", ".gif", ".webp", ".avif", ".svg", ".bmp", ".ico", ".tiff"})
+_FONT_EXTS = frozenset({".woff", ".woff2", ".ttf", ".otf", ".eot"})
+_CSS_EXTS = frozenset({".css"})
+_JS_EXTS = frozenset({".js"})
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -96,42 +146,131 @@ def _classify_asset(path_str: str) -> str:
     return "other"
 
 
-def _should_skip_tag(el: Tag) -> bool:
-    """Filter out non-content layout elements during hierarchical parsing."""
-    if el.name in {"script", "style", "noscript", "iframe", "svg", "canvas", "br", "hr", "header", "footer", "nav"}:
+def _is_layout_class(cls_name: str) -> bool:
+    """Check if a class name is a generic layout/utility class (not semantic)."""
+    c = cls_name.strip().lower()
+    if c in _LAYOUT_CLASSES:
         return True
-    cls = _safe_attr(el, "class").lower()
-    eid = _safe_attr(el, "id").lower()
-    for keyword in ("header", "footer", "nav", "menu", "sidebar", "ad-", "banner", "popup", "modal", "comment-form"):
-        if keyword in cls or keyword in eid:
-            return True
+    # Bootstrap col patterns: col-xs-12, col-md-6, etc.
+    if re.match(r"^col-\w+-\d+$", c):
+        return True
+    # CSS module hashes are not semantic
+    if _CSS_MODULE_RE.match(cls_name.strip()):
+        return True
+    # Utility spacing/sizing classes
+    if _UTILITY_CLASS_RE.match(c):
+        return True
     return False
 
 
+def _clean_semantic_key(raw_key: str) -> str:
+    """Clean a CSS module hash or utility class into a readable key.
+
+    Examples:
+        'NavLink-module__title__Q7t0p' -> 'nav-link-title'
+        'NavGroup-module__list__UCOFy' -> 'nav-group-list'
+        'position-relative'            -> '' (empty, layout class)
+    """
+    raw = raw_key.strip()
+
+    # Handle CSS module pattern: Component-module__element__hash
+    m = re.match(r"^([A-Za-z][\w-]*)-module__([A-Za-z][\w-]*)__[\w]+$", raw)
+    if m:
+        component = m.group(1)
+        element = m.group(2)
+        # Convert CamelCase to kebab-case
+        component = re.sub(r"(?<=[a-z])(?=[A-Z])", "-", component).lower()
+        element = re.sub(r"(?<=[a-z])(?=[A-Z])", "-", element).lower()
+        return f"{component}-{element}"
+
+    return raw
+
+
 def _get_semantic_key(el: Tag) -> str:
-    """Determine a semantic key for a Tag based on class/id/tag name, ignoring layout utilities."""
+    """Determine a clean, semantic key for a Tag based on class/id/tag name.
+
+    Filters out layout utility classes and cleans CSS module hashes.
+    Falls back to tag name if no semantic class/id found.
+    """
     classes = el.get("class", [])
     if isinstance(classes, str):
         classes = classes.split()
-    
-    # Check for first class name that is not a generic layout utility
+
+    # Check for first class name that is semantically meaningful
     for cls in classes:
-        cls_clean = cls.strip().lower()
-        if cls_clean not in _LAYOUT_CLASSES and not re.match(r'^col-\w+-\d+$', cls_clean):
-            return cls.strip()
-            
+        cls_clean = cls.strip()
+        if not cls_clean:
+            continue
+
+        # Skip pure layout/utility classes
+        if _is_layout_class(cls_clean):
+            continue
+
+        # Clean CSS module hashes to readable names
+        cleaned = _clean_semantic_key(cls_clean)
+        if cleaned:
+            return cleaned
+
     # Fallback to ID if present
     eid = el.get("id")
     if eid and isinstance(eid, str) and eid.strip():
         return eid.strip()
-        
-    # Fallback to defaults
+
+    # Fallback to semantic tag names
     if el.name in {"h1", "h2", "h3", "h4", "h5", "h6"}:
         return "title"
     if el.name == "p":
         return "description"
-        
+
     return el.name
+
+
+def _is_decorative_text(text: str) -> bool:
+    """Check if text is purely decorative (separators, single symbols)."""
+    if not text:
+        return True
+    stripped = text.strip()
+    # Single punctuation/symbols used as separators
+    if len(stripped) <= 2 and not stripped.isalnum():
+        return True
+    # Common decorative patterns
+    if stripped in {"|", "·", "•", "-", "—", "–", "/", "\\", ">>", "<<", "...", "→", "←"}:
+        return True
+    return False
+
+
+def _is_junk_url(url: str) -> bool:
+    """Check if a URL is a javascript: void or similar non-navigable link."""
+    if not url:
+        return True
+    lower = url.strip().lower()
+    return lower.startswith(("javascript:", "void(", "#"))
+
+
+def _get_img_src(el: Tag) -> str:
+    """Get the best image source from an img element, checking common lazy-load attrs."""
+    for attr in ("src", "data-src", "data-original", "data-lazy-src"):
+        val = _safe_attr(el, attr)
+        if val and not val.startswith("data:"):
+            return val
+    return _safe_attr(el, "src")
+
+
+def _get_direct_text(el: Tag) -> str:
+    """Get direct text content from an element (not from child tags).
+
+    Filters out HTML comments and collapses whitespace.
+    """
+    parts = []
+    for child in el.children:
+        if isinstance(child, Comment):
+            continue
+        if isinstance(child, NavigableString) and not isinstance(child, Tag):
+            text = str(child).strip()
+            if text:
+                parts.append(text)
+    combined = " ".join(parts)
+    return re.sub(r"\s+", " ", combined).strip()
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -140,15 +279,19 @@ def _get_semantic_key(el: Tag) -> str:
 
 class URLResolver:
     """Resolves relative URLs and maps absolute URLs to local snapshot files."""
+
     def __init__(self, base_url: str, routes: dict):
         self.base_url = base_url
         self.routes = routes
 
     def resolve(self, url: str) -> str:
-        """Resolve a relative URL against the base URL, avoiding double slash issues."""
+        """Resolve a relative URL against the base URL."""
         if not url or url.startswith(("data:", "javascript:", "mailto:", "tel:", "#")):
             return url
-        if url.startswith(("http://", "https://", "//")):
+        if url.startswith("//"):
+            scheme = urlparse(self.base_url).scheme or "https"
+            return f"{scheme}:{url}"
+        if url.startswith(("http://", "https://")):
             return url
         if self.base_url:
             base = self.base_url if self.base_url.endswith("/") else self.base_url + "/"
@@ -181,6 +324,37 @@ class URLResolver:
                     and not route_path.startswith("redirect:")):
                 return route_path.replace("\\", "/")
 
+        # Fallback 1: Scheme + query-agnostic check
+        for route_url, route_path in self.routes.items():
+            rp = urlparse(route_url)
+            if (rp.netloc == parsed.netloc
+                    and rp.path == parsed.path
+                    and not route_path.startswith("redirect:")):
+                return route_path.replace("\\", "/")
+
+        # Fallback 2: Thumbnail size-agnostic check (Shopify / Bizweb / Dktcdn / etc.)
+        # e.g., /thumb/large/100/363/abc.jpg -> /100/363/abc.jpg
+        parsed_path_norm = re.sub(r'^/?thumb/[^/]+/', '/', parsed.path)
+        for route_url, route_path in self.routes.items():
+            rp = urlparse(route_url)
+            rp_path_norm = re.sub(r'^/?thumb/[^/]+/', '/', rp.path)
+            if (rp.netloc == parsed.netloc
+                    and rp_path_norm == parsed_path_norm
+                    and not route_path.startswith("redirect:")):
+                return route_path.replace("\\", "/")
+
+        # Fallback 3: Filename size-suffix agnostic check (last resort)
+        # e.g., image_large.png -> image.png
+        filename = parsed.path.split('/')[-1]
+        if filename:
+            base_name = re.sub(r'_(large|medium|small|thumb|\d+x\d+)', '', filename)
+            for route_url, route_path in self.routes.items():
+                rp_parsed = urlparse(route_url)
+                rp_filename = rp_parsed.path.split('/')[-1]
+                rp_base_name = re.sub(r'_(large|medium|small|thumb|\d+x\d+)', '', rp_filename)
+                if rp_base_name == base_name and rp_parsed.netloc == parsed.netloc:
+                    return route_path.replace("\\", "/")
+
         return None
 
 
@@ -190,6 +364,7 @@ class URLResolver:
 
 class MetadataExtractor:
     """Extracts page metadata from HTML <head>."""
+
     def __init__(self, soup: BeautifulSoup, resolver: URLResolver):
         self.soup = soup
         self.resolver = resolver
@@ -238,7 +413,7 @@ class MetadataExtractor:
             fav_url = self.resolver.resolve(_safe_attr(fav_el, "href"))
             meta["favicon"] = {
                 "url": fav_url,
-                "local_path": self.resolver.map_to_local(fav_url),
+                "local_path": self.resolver.map_to_local(fav_url)
             }
         else:
             meta["favicon"] = None
@@ -246,10 +421,11 @@ class MetadataExtractor:
         # OG Image
         og_el = self.soup.find("meta", attrs={"property": "og:image"})
         if og_el:
-            og_url = _safe_attr(og_el, "content")
+            raw_url = _safe_attr(og_el, "content")
+            resolved = self.resolver.resolve(raw_url)
             meta["og_image"] = {
-                "url": og_url,
-                "local_path": self.resolver.map_to_local(og_url),
+                "url": resolved,
+                "local_path": self.resolver.map_to_local(resolved)
             }
         else:
             meta["og_image"] = None
@@ -269,6 +445,7 @@ class MetadataExtractor:
 
 class NavigationExtractor:
     """Extracts navigation links and structure."""
+
     def __init__(self, soup: BeautifulSoup, resolver: URLResolver):
         self.soup = soup
         self.resolver = resolver
@@ -325,6 +502,7 @@ class NavigationExtractor:
 
 class AssetFlowExtractor:
     """Classifies static assets and logs internal/external routes + API calls."""
+
     def __init__(self, soup: BeautifulSoup, resolver: URLResolver, snap_dir: Path, routes: dict):
         self.soup = soup
         self.resolver = resolver
@@ -348,14 +526,12 @@ class AssetFlowExtractor:
                 "resolved_url": resolved,
                 "local_path": self.resolver.map_to_local(resolved),
                 "alt": _safe_attr(img, "alt"),
-                "width": _safe_attr(img, "width"),
-                "height": _safe_attr(img, "height"),
             })
 
         bg_images = []
         for el in self.soup.find_all(style=True):
             style = _safe_attr(el, "style")
-            for match in re.findall(r"url\(['\"]?([^)'\">]+)['\"]?\)", style):
+            for match in re.findall(r"url\(['\"]?([^)'\">\s]+)['\"]?\)", style):
                 resolved = self.resolver.resolve(match)
                 bg_images.append({
                     "url": match,
@@ -510,7 +686,8 @@ class AssetFlowExtractor:
 # ──────────────────────────────────────────────────────────────────────────────
 
 class StructuredContentExtractor:
-    """Extracts flat paragraphs/tables/code and the new exact DOM hierarchical area trees."""
+    """Extracts flat paragraphs/tables/code and clean recursive DOM hierarchical trees."""
+
     def __init__(self, soup: BeautifulSoup, resolver: URLResolver):
         self.soup = soup
         self.resolver = resolver
@@ -525,17 +702,21 @@ class StructuredContentExtractor:
             "hierarchical_areas": self._extract_hierarchical_areas(),
         }
 
+    # ── Headings ──────────────────────────────────────────────────────────
+
     def _extract_headings(self) -> list[dict]:
-        headings_ordered = []
+        headings = []
         for h in self.soup.find_all(re.compile(r"^h[1-6]$")):
             text = _text(h)
             if text:
-                headings_ordered.append({
+                headings.append({
                     "level": int(h.name[1]),
                     "text": text,
                     "id": _safe_attr(h, "id"),
                 })
-        return headings_ordered
+        return headings
+
+    # ── Flat Sections (backward compat for markdown generation) ───────────
 
     def _extract_flat_sections(self) -> list[dict]:
         sections = []
@@ -592,8 +773,6 @@ class StructuredContentExtractor:
                 "resolved_url": resolved,
                 "local_path": self.resolver.map_to_local(resolved),
                 "alt": _safe_attr(img, "alt"),
-                "width": _safe_attr(img, "width"),
-                "height": _safe_attr(img, "height"),
             })
 
         section["links"] = []
@@ -696,199 +875,120 @@ class StructuredContentExtractor:
 
         return {"headers": headers, "rows": rows}
 
-    def _extract_hierarchical_areas(self) -> list[dict]:
-        """Runs the DOM recursive hierarchical builder starting from main content areas."""
-        areas = []
-        found_elements = set()
+    # ── Hierarchical Areas (full DOM tree parser) ─────────────────────────
 
-        for selector in _CONTENT_SELECTORS:
-            try:
-                elements = self.soup.select(selector)
-            except Exception:
-                continue
+    def _extract_hierarchical_areas(self) -> dict:
+        """Extract the entire body as a clean, structured HTML string.
 
-            for el in elements:
-                el_id = id(el)
-                if el_id in found_elements:
-                    continue
-                if el.name == "nav" or _should_skip_tag(el):
-                    continue
+        Works for ALL types of websites: traditional HTML, SPAs, framework-based.
+        """
+        if not self.soup:
+            return {"html": ""}
 
-                found_elements.add(el_id)
-                parsed = self._parse_hierarchical_element(el)
-                if parsed:
-                    areas.append({
-                        "element": el.name,
-                        "id": _safe_attr(el, "id"),
-                        "class": _safe_attr(el, "class"),
-                        "data": parsed
-                    })
+        clean_html = self._generate_clean_html()
+        return {"html": clean_html}
 
-        # Fallback to body
-        if not areas:
-            body = self.soup.find("body")
-            if body:
-                parsed = self._parse_hierarchical_element(body)
-                if parsed:
-                    areas.append({
-                        "element": "body",
-                        "id": _safe_attr(body, "id"),
-                        "class": _safe_attr(body, "class"),
-                        "data": parsed
-                    })
+    def _generate_clean_html(self) -> str:
+        """Generate a clean, structured HTML representation of the page."""
+        body = self.soup.find("body")
+        if not body:
+            body = self.soup
 
-        return areas
+        # To avoid deepcopy issues on large BeautifulSoup trees, re-parse the string representation of body
+        body_copy = BeautifulSoup(str(body), "html.parser").find("body") or BeautifulSoup(str(body), "html.parser")
 
-    def _parse_hierarchical_element(self, el: Tag) -> dict | list | str | None:
-        """Recursively parses a Tag into a detailed dictionary layout mapping DOM layout to JSON attributes."""
-        if not isinstance(el, Tag):
-            return None
+        # Decompose elements that are not content-bearing
+        TAGS_TO_REMOVE = {
+            "script", "style", "noscript", "iframe", "svg", "canvas",
+            "link", "meta", "base", "template", "embed", "object", "audio",
+            "video", "map", "area", "track", "source", "picture",
+            "input", "select", "textarea", "button", "form", "option",
+            "optgroup", "fieldset", "legend", "br", "hr"
+        }
+        for tag in body_copy.find_all(list(TAGS_TO_REMOVE)):
+            tag.decompose()
 
-        if _should_skip_tag(el):
-            return None
+        # Remove all HTML comments
+        from bs4 import Comment
+        for comment in body_copy.find_all(string=lambda text: isinstance(text, Comment)):
+            comment.extract()
 
-        child_tags = [c for c in el.contents if isinstance(c, Tag) and not _should_skip_tag(c)]
+        def process_node(node):
+            if not isinstance(node, Tag):
+                return
 
-        # 1. Handle leaf tags (no significant Tag children)
-        if not child_tags:
-            if el.name == "img":
-                src = self.resolver.resolve(_safe_attr(el, "src"))
-                local_path = self.resolver.map_to_local(src)
-                alt = _safe_attr(el, "alt")
-                cls = _get_semantic_key(el)
-                
-                if cls and cls != "img":
-                    return {
-                        f"{cls}_src": src,
-                        f"{cls}_alt": alt,
-                        f"{cls}_local": local_path
-                    }
-                else:
-                    key_prefix = "icon" if ("ico" in src or "icon" in src or "user" in src) else "img"
-                    return {
-                        f"{key_prefix}_src": src,
-                        f"{key_prefix}_alt": alt,
-                        f"{key_prefix}_local": local_path
-                    }
-            elif el.name == "a":
-                href = self.resolver.resolve(_safe_attr(el, "href"))
-                text = _text(el)
-                cls = _get_semantic_key(el)
-                if cls and cls != "a":
-                    return {
-                        f"{cls}_href": href,
-                        f"{cls}_name": text
-                    }
-                else:
-                    return {
-                        "href": href,
-                        "text": text
-                    }
-            else:
-                # Other leaf tags like span, i, b, p, h1-h6
-                text = _text(el)
-                if not text:
-                    return None
-                cls = _get_semantic_key(el)
-                if cls == el.name:
-                    return text
-                return {cls: text}
+            # Recursively process children
+            children = list(node.children)
+            for child in children:
+                process_node(child)
 
-        # 2. Handle a tag with a single img child (link-image wrapper)
-        if el.name == "a" and len(child_tags) == 1 and child_tags[0].name == "img":
-            img_el = child_tags[0]
-            href = self.resolver.resolve(_safe_attr(el, "href"))
-            src = self.resolver.resolve(_safe_attr(img_el, "src"))
-            local_path = self.resolver.map_to_local(src)
-            alt = _safe_attr(img_el, "alt")
-            
-            cls = _get_semantic_key(el)
-            if not cls or cls == "a":
-                cls = _get_semantic_key(img_el)
-            
-            if cls and cls != "img" and cls != "a":
-                return {
-                    f"{cls}_href": href,
-                    f"{cls}_src": src,
-                    f"{cls}_alt": alt,
-                    f"{cls}_local": local_path
-                }
-            else:
-                return {
-                    "href": href,
-                    "img_src": src,
-                    "img_alt": alt,
-                    "img_local": local_path
-                }
+            attrs = {}
 
-        # 3. Handle headings containing text and possibly a link
-        if el.name in {"h1", "h2", "h3", "h4", "h5", "h6"}:
-            text = _text(el)
-            a_child = el.find("a")
-            if a_child and isinstance(a_child, Tag):
-                href = self.resolver.resolve(_safe_attr(a_child, "href"))
-                return {
-                    "title": text,
-                    "title_href": href
-                }
-            else:
-                return {
-                    "title": text
-                }
+            # Clean class names
+            classes = node.get("class", [])
+            if isinstance(classes, str):
+                classes = classes.split()
+            cleaned_classes = []
+            for cls in classes:
+                cls_clean = cls.strip()
+                if cls_clean and not _is_layout_class(cls_clean):
+                    cleaned_cls = _clean_semantic_key(cls_clean)
+                    if cleaned_cls:
+                        cleaned_classes.append(cleaned_cls)
+            if cleaned_classes:
+                attrs["class"] = " ".join(cleaned_classes)
 
-        # 4. Handle lists (ul, ol)
-        if el.name in {"ul", "ol"}:
-            items = []
-            for li in el.find_all("li", recursive=False):
-                li_val = self._parse_hierarchical_element(li)
-                if li_val:
-                    items.append(li_val)
-            return items if items else None
+            # Clean IDs
+            eid = node.get("id")
+            if eid and isinstance(eid, str) and eid.strip():
+                eid_clean = eid.strip()
+                if not any(kw in eid_clean.lower() for kw in ["col", "row", "flex", "grid", "wrapper", "container"]):
+                    attrs["id"] = eid_clean
 
-        # 5. Handle generic container tags (div, li, section, etc.)
-        res_dict = {}
-        
-        # Check direct text inside container (e.g. text nodes mixed with child elements)
-        direct_text = "".join(c for c in el.contents if isinstance(c, NavigableString)).strip()
-        if direct_text:
-            res_dict["text"] = re.sub(r"\s+", " ", direct_text)
+            # Keep and resolve URL attributes
+            if node.name == "a":
+                href = node.get("href")
+                if href:
+                    href_clean = href.strip()
+                    if not _is_junk_url(href_clean):
+                        attrs["href"] = self.resolver.resolve(href_clean)
+            elif node.name == "img":
+                src = _get_img_src(node)
+                if src:
+                    resolved = self.resolver.resolve(src)
+                    attrs["src"] = self.resolver.map_to_local(resolved) or resolved
+                alt = node.get("alt")
+                if alt:
+                    attrs["alt"] = alt.strip()
 
-        for child in child_tags:
-            child_val = self._parse_hierarchical_element(child)
-            if not child_val:
-                continue
+            # Set cleaned attributes
+            node.attrs = attrs
 
-            # Check if the child tag represents a leaf node structure (including headings)
-            is_leaf_child = (
-                (not [c for c in child.contents if isinstance(c, Tag) and not _should_skip_tag(c)]) or 
-                (child.name == "a" and len([c for c in child.contents if isinstance(c, Tag) and not _should_skip_tag(c)]) == 1 and child.contents[0].name == "img") or
-                (child.name in {"h1", "h2", "h3", "h4", "h5", "h6"})
-            )
-
-            if is_leaf_child and isinstance(child_val, dict):
-                # Flat-merge properties of simple leaf children directly into the container dict
-                for k, v in child_val.items():
-                    if k not in res_dict:
-                        res_dict[k] = v
+            # Clean text children nodes
+            for child in list(node.children):
+                if not isinstance(child, Tag):
+                    text = str(child)
+                    normalized = re.sub(r"\s+", " ", text).strip()
+                    if not normalized:
+                        child.extract()
                     else:
-                        if not isinstance(res_dict[k], list):
-                            res_dict[k] = [res_dict[k]]
-                        res_dict[k].append(v)
-            else:
-                child_key = _get_semantic_key(child)
-                
-                # Simplify if child_val is a dict with only one key matching child_key
-                if isinstance(child_val, dict) and len(child_val) == 1 and child_key in child_val:
-                    child_val = child_val[child_key]
+                        child.replace_with(normalized)
 
-                if child_key not in res_dict:
-                    res_dict[child_key] = child_val
-                else:
-                    if not isinstance(res_dict[child_key], list):
-                        res_dict[child_key] = [res_dict[child_key]]
-                    res_dict[child_key].append(child_val)
+            # Pruning/collapsing
+            sub_tags = [c for c in node.children if isinstance(c, Tag)]
+            sub_texts = [c for c in node.children if not isinstance(c, Tag)]
 
-        return res_dict if res_dict else None
+            # Collapse single-child wrapper divs/spans with no attributes
+            if node.name in {"div", "span"} and not node.attrs and len(sub_tags) == 1 and not sub_texts:
+                node.replace_with(sub_tags[0])
+                return
+
+            # Remove empty generic elements
+            if node.name in {"div", "span", "p"} and not sub_tags and not sub_texts:
+                node.decompose()
+
+        process_node(body_copy)
+        return body_copy.prettify()
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -911,9 +1011,7 @@ class ContentExtractor:
         self.base_url: str = ""
 
     def extract(self) -> dict:
-        """
-        Run the extraction pipeline and write the output into extracted_data.json.
-        """
+        """Run the extraction pipeline and write the output into extracted_data.json."""
         self._load_manifest()
         self._load_html()
 
@@ -945,13 +1043,40 @@ class ContentExtractor:
         except OSError as exc:
             log("ERR", f"Failed to write extracted_data.json: {exc}")
 
+        # Save clean hierarchical HTML to a separate file
+        try:
+            ha = data.get("content", {}).get("hierarchical_areas", {})
+            clean_html = ha.get("html", "") if isinstance(ha, dict) else ""
+            if clean_html:
+                html_out = self.snap_dir / "hierarchical_areas.html"
+                html_out.write_text(clean_html, encoding="utf-8")
+                log("OK", f"Saved clean hierarchical HTML → {html_out.name}")
+        except Exception as e:
+            log("WARN", f"Failed to save clean hierarchical HTML: {e}")
+
+        # Save markdown using MarkdownGenerator
+        try:
+            from src.md_generator import MarkdownGenerator
+            md_gen = MarkdownGenerator(out_path, data=data)
+            md_gen.generate()
+            log("OK", f"Generated content.md for {self.snap_dir.name}")
+        except Exception as e:
+            log("WARN", f"Failed to generate markdown: {e}")
+
+        # Mark as extracted in ArchiveIndex
+        try:
+            archive_root = self.snap_dir.parent.parent
+            from src.archive import ArchiveIndex
+            idx = ArchiveIndex(archive_root)
+            idx.mark_extracted(self.manifest.get("id", self.snap_dir.name))
+        except Exception as e:
+            log("WARN", f"Failed to update archive index status: {e}")
+
         return data
 
     @staticmethod
     def extract_all(archive_dir: str | Path = "web_archive") -> list[dict]:
-        """
-        Extract content from every snapshot in the archive.
-        """
+        """Extract content from every snapshot in the archive."""
         archive_root = Path(archive_dir)
         index_path = archive_root / "index.json"
         results = []

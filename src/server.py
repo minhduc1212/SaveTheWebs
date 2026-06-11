@@ -823,9 +823,82 @@ body{font-family:'Inter',system-ui,sans-serif;background:var(--bg);color:var(--t
 details[open] > summary {
   margin-bottom: 6px;
 }
-summary {
+/* ── Collapsible DOM Tree (DevTools style) ── */
+.dom-tree-container {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 0.85rem;
+  line-height: 1.6;
+  color: var(--text2);
+  user-select: text;
+}
+.dom-line {
+  padding-left: 14px;
+  margin: 2px 0;
+}
+details.dom-details {
+  display: block;
+  margin: 2px 0;
+}
+details.dom-details > summary {
+  list-style: none;
+  position: relative;
+  padding-left: 14px;
   outline: none;
-  user-select: none;
+  cursor: pointer;
+}
+details.dom-details > summary::-webkit-details-marker {
+  display: none;
+}
+details.dom-details > summary::before {
+  content: "▶";
+  position: absolute;
+  left: 2px;
+  top: 1px;
+  font-size: 0.65rem;
+  color: var(--text3);
+  transition: transform 0.15s ease;
+}
+details.dom-details[open] > summary::before {
+  transform: rotate(90deg);
+}
+.dom-children {
+  border-left: 1px dashed rgba(255, 255, 255, 0.08);
+  margin-left: 6px;
+  padding-left: 8px;
+}
+.dom-tag {
+  color: #f43f5e;
+  font-weight: 500;
+}
+.dom-attr-name {
+  color: #fb923c;
+}
+.dom-attr-val {
+  color: #22c55e;
+}
+.dom-text {
+  color: var(--text1);
+  font-family: 'Inter', sans-serif;
+  font-size: 0.88rem;
+  margin: 0 4px;
+  background: rgba(255, 255, 255, 0.02);
+  padding: 0px 4px;
+  border-radius: 3px;
+}
+.dom-closing {
+  padding-left: 14px;
+  color: var(--text2);
+}
+details.dom-details:not([open]) > summary .dom-ellipsis {
+  display: inline;
+  background: rgba(255, 255, 255, 0.08);
+  padding: 0 4px;
+  border-radius: 3px;
+  font-size: 0.75rem;
+  color: var(--accent2);
+}
+.dom-ellipsis {
+  display: none;
 }
 </style>
 </head>
@@ -1103,27 +1176,227 @@ function renderTreeRecursive(val) {
 function renderHierarchicalAreas(data) {
   const container = document.getElementById('hierarchical-areas-view');
   if (!container) return;
-  
-  const areas = data.content && data.content.hierarchical_areas ? data.content.hierarchical_areas : [];
-  if (!areas.length) {
+
+  const ha = data.content && data.content.hierarchical_areas ? data.content.hierarchical_areas : null;
+  if (!ha) {
     container.innerHTML = '<div class="empty-state"><div class="icon">🌳</div><h2>No hierarchical areas found</h2><p>Try re-extracting this page.</p></div>';
     return;
   }
+
+  // Support both old array format and new dictionary format
+  if (typeof ha === 'object' && ha.html !== undefined) {
+    const cleanHtml = ha.html || '';
+    
+    // Render the beautiful tabbed panel
+    container.innerHTML = `
+      <div class="ha-tabs" style="display:flex; gap:8px; margin-bottom:16px;">
+        <button class="h-btn active" id="btn-ha-visual" onclick="toggleHAMode('visual')">👁️ Visual Structure</button>
+        <button class="h-btn" id="btn-ha-code" onclick="toggleHAMode('code')">🌳 Interactive HTML Tree</button>
+      </div>
+      
+      <div id="ha-visual-panel">
+        <iframe id="ha-iframe" src="/__asset/${SNAP_ID}/hierarchical_areas.html" style="width:100%; height:700px; border:1px solid var(--border); border-radius:var(--radius); background:var(--bg2);" sandbox="allow-same-origin"></iframe>
+      </div>
+      
+      <div id="ha-code-panel" style="display:none;">
+        <div class="dom-tree-container" id="ha-dom-tree" style="background:var(--panel2); border:1px solid var(--border); border-radius:var(--radius); padding:20px; max-height:700px; overflow-y:auto; overflow-x:auto; font-family:'JetBrains Mono',monospace; font-size:0.85rem; line-height:1.5; color:var(--text2);">
+          Loading interactive HTML tree...
+        </div>
+      </div>
+    `;
+
+    // Add iframe loaded style injection
+    const iframe = document.getElementById('ha-iframe');
+    if (iframe) {
+      iframe.onload = () => {
+        try {
+          const doc = iframe.contentDocument || iframe.contentWindow.document;
+          const style = doc.createElement('style');
+          style.innerHTML = `
+            body {
+              font-family: 'Inter', system-ui, sans-serif;
+              color: #f1f5f9;
+              background: #08090f;
+              padding: 24px;
+              line-height: 1.6;
+              max-width: 1000px;
+              margin: 0 auto;
+            }
+            h1, h2, h3, h4, h5, h6 {
+              font-family: 'Outfit', sans-serif;
+              margin-top: 20px;
+              margin-bottom: 10px;
+              color: #a78bfa;
+            }
+            p {
+              margin-bottom: 12px;
+              color: #cbd5e1;
+            }
+            a {
+              color: #38bdf8;
+              text-decoration: none;
+            }
+            a:hover {
+              text-decoration: underline;
+            }
+            img {
+              max-width: 150px;
+              max-height: 150px;
+              object-fit: contain;
+              border-radius: 6px;
+              margin: 8px 0;
+              border: 1px solid rgba(255,255,255,0.1);
+              display: block;
+            }
+            div {
+              border: 1px dashed rgba(139, 92, 246, 0.2);
+              padding: 10px;
+              margin: 8px 0;
+              border-radius: 6px;
+              background: rgba(139, 92, 246, 0.01);
+            }
+            ul, ol {
+              margin: 8px 0 8px 20px;
+              color: #cbd5e1;
+            }
+            li {
+              margin-bottom: 4px;
+            }
+            table {
+              width: 100%;
+              border-collapse: collapse;
+              margin: 12px 0;
+            }
+            th, td {
+              border: 1px solid rgba(255,255,255,0.1);
+              padding: 6px 10px;
+              text-align: left;
+            }
+            th {
+              background: #111422;
+            }
+          `;
+          doc.head.appendChild(style);
+        } catch (e) {
+          console.error("Failed to inject style into iframe: ", e);
+        }
+      };
+    }
+
+    // Parse clean HTML string and build interactive DOM tree view
+    try {
+      const parser = new DOMParser();
+      const doc = parser.parseFromString(cleanHtml, 'text/html');
+      const body = doc.body.firstElementChild || doc.body;
+      const domTree = document.getElementById('ha-dom-tree');
+      if (domTree) {
+        domTree.innerHTML = renderDOMTreeRecursive(body);
+      }
+    } catch (e) {
+      console.error("Failed to parse clean HTML for interactive tree: ", e);
+      const domTree = document.getElementById('ha-dom-tree');
+      if (domTree) {
+        domTree.innerHTML = `<span style="color:var(--red)">Failed to render tree: ${escapeHtml(e.message)}</span>`;
+      }
+    }
+    return;
+  }
+
+  // Fallback to old array format if present
+  if (Array.isArray(ha)) {
+    let html = '';
+    ha.forEach((area, i) => {
+      html += `<div class="content-section" style="margin-bottom: 24px; border-left: 3px solid var(--accent); padding-left: 16px;">`;
+      const tag = area.element || 'div';
+      const cls = area.class ? ` class="${area.class}"` : '';
+      const eid = area.id ? ` id="${area.id}"` : '';
+      html += `<div style="font-family: monospace; font-size: 0.85rem; color: var(--text3); margin-bottom: 12px; background: #1e293b; padding: 4px 8px; border-radius: 4px; display: inline-block;">`;
+      html += `&lt;${tag}${cls}${eid}&gt;`;
+      html += `</div>`;
+      html += renderTreeRecursive(area.data);
+      html += `</div>`;
+    });
+    container.innerHTML = html;
+  }
+}
+
+function renderDOMTreeRecursive(node) {
+  if (node.nodeType === Node.TEXT_NODE) {
+    const text = node.nodeValue.trim();
+    if (!text) return '';
+    return `<span class="dom-text">${escapeHtml(text)}</span>`;
+  }
   
-  let html = '';
-  areas.forEach((area, i) => {
-    html += `<div class="content-section" style="margin-bottom: 24px; border-left: 3px solid var(--accent); padding-left: 16px;">`;
-    const tag = area.element || 'div';
-    const cls = area.class ? ` class="${area.class}"` : '';
-    const eid = area.id ? ` id="${area.id}"` : '';
-    html += `<div style="font-family: monospace; font-size: 0.85rem; color: var(--text3); margin-bottom: 12px; background: #1e293b; padding: 4px 8px; border-radius: 4px; display: inline-block;">`;
-    html += `&lt;${tag}${cls}${eid}&gt;`;
-    html += `</div>`;
-    html += renderTreeRecursive(area.data);
-    html += `</div>`;
+  if (node.nodeType !== Node.ELEMENT_NODE) {
+    return '';
+  }
+
+  const tagName = node.tagName.toLowerCase();
+  
+  // Build attributes string
+  let attrsHtml = '';
+  for (let i = 0; i < node.attributes.length; i++) {
+    const attr = node.attributes[i];
+    attrsHtml += ` <span class="dom-attr-name">${escapeHtml(attr.name)}</span>=<span class="dom-attr-val">"${escapeHtml(attr.value)}"</span>`;
+  }
+
+  const childNodes = Array.from(node.childNodes).filter(child => {
+    if (child.nodeType === Node.TEXT_NODE) {
+      return child.nodeValue.trim().length > 0;
+    }
+    return child.nodeType === Node.ELEMENT_NODE;
   });
+
+  if (childNodes.length === 0) {
+    // Self-closing or empty tag
+    if (['img', 'br', 'hr', 'input'].includes(tagName)) {
+      return `<div class="dom-line">&lt;<span class="dom-tag">${tagName}</span>${attrsHtml}/&gt;</div>`;
+    }
+    return `<div class="dom-line">&lt;<span class="dom-tag">${tagName}</span>${attrsHtml}&gt;&lt;/<span class="dom-tag">${tagName}</span>&gt;</div>`;
+  }
+
+  // If it has only one text child, render it on a single line!
+  if (childNodes.length === 1 && childNodes[0].nodeType === Node.TEXT_NODE) {
+    const text = childNodes[0].nodeValue.trim();
+    return `<div class="dom-line">&lt;<span class="dom-tag">${tagName}</span>${attrsHtml}&gt;<span class="dom-text">${escapeHtml(text)}</span>&lt;/<span class="dom-tag">${tagName}</span>&gt;</div>`;
+  }
+
+  // Recursive tree with details/summary (collapsible)
+  let childrenHtml = '<div class="dom-children">';
+  childNodes.forEach(child => {
+    childrenHtml += renderDOMTreeRecursive(child);
+  });
+  childrenHtml += '</div>';
+
+  return `
+    <details class="dom-details" open>
+      <summary class="dom-summary">
+        &lt;<span class="dom-tag">${tagName}</span>${attrsHtml}&gt;
+        <span class="dom-ellipsis">...</span>
+      </summary>
+      ${childrenHtml}
+      <div class="dom-closing">&lt;/<span class="dom-tag">${tagName}</span>&gt;</div>
+    </details>
+  `;
+}
+
+function toggleHAMode(mode) {
+  const btnVisual = document.getElementById('btn-ha-visual');
+  const btnCode = document.getElementById('btn-ha-code');
+  const panelVisual = document.getElementById('ha-visual-panel');
+  const panelCode = document.getElementById('ha-code-panel');
   
-  container.innerHTML = html;
+  if (mode === 'visual') {
+    btnVisual.classList.add('active');
+    btnCode.classList.remove('active');
+    panelVisual.style.display = 'block';
+    panelCode.style.display = 'none';
+  } else {
+    btnVisual.classList.remove('active');
+    btnCode.classList.add('active');
+    panelVisual.style.display = 'none';
+    panelCode.style.display = 'block';
+  }
 }
 
 function _getSections(data) {
@@ -1203,7 +1476,7 @@ function renderTextContent(text) {
 }
 
 function renderImage(img) {
-  let src = img.src || img.url || img;
+  let src = img.local_path || img.src || img.url || img;
   if (typeof src === 'string' && !src.startsWith('http') && !src.startsWith('data:')) {
     src = `/__asset/${SNAP_ID}/${src}`;
   }

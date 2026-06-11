@@ -71,5 +71,10 @@ the section of json, md data should be more detailed that: for example, in html 
     it means remake data to json struct, the level, .. should be like in the web, but still kêp the data struct divided byL type: img_tag, section in current version, the md file is oke
 
 
+remake Hierarchical Areas that display the data: text, img, ... with the struct of html code of all web, all type, all kind of wweb , all type, has to be full - html file but cleaner, structable, easy to understand. REMMEMBER THAT ALL WWEB< ALL KIND OF Web. THE DATA in
+  Hierarchical Areas  shoukd be clean, remove the data not neeed, js, css, ... width, ... -? just the core data to understand the struct of web easy to read, to understand
+
+i want the old version of showing the html code in hierachy struct that: contain like a json file, can open, minize, maximize, like a element in chrome dev tool, this current of html code in Hierarchical Areas is so hard to see, very confusing
+
 auto exact when record, after record -> get all need data: json, md, replay,.. not to click exact in web replay
 the button, click, ... has to work like the normal web when replay

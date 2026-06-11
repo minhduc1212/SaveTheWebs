@@ -1,0 +1,49 @@
+[
+  {
+    "element": "body",
+    "id": "",
+    "class": "",
+    "data": {
+      "__nuxt": {
+        "qm-fixed-right": [
+          {
+            "s-tit": "免费 小说"
+          },
+          {
+            "s-tit": "联系 编辑"
+          },
+          {
+            "qm-fixed-right-extend": {
+              "qrcode-tit": "七猫中文网公众号",
+              "qrcode-img_src": "https://cdn-front.qimao.com/qimao/pc/img/common/right_qrcode.2375b4e.png",
+              "qrcode-txt": "微信扫一扫关注"
+            },
+            "qm-fixed-right-link": {
+              "s-tit": "公众号"
+            }
+          },
+          {
+            "qm-fixed-right-link": {
+              "s-tit": "顶部"
+            }
+          }
+        ],
+        "qm-pop": {
+          "qm-pop-mod": {
+            "qm-pop-mod-th": {
+              "s-tit": "新人注册"
+            },
+            "qm-pop-mod-tb": {
+              "s-des": "现可免费阅读全站小说，扫描下方二维码，下载七猫免费小说APP，更多新人福利等着你！",
+              "qr-code": {
+                "img_src": "https://cdn-front.qimao.com/qimao/pc/img/common/app-qr-code-pic.6318250.png",
+                "img_alt": "七猫免费小说app",
+                "em": "下载七猫免费小说APP"
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+]

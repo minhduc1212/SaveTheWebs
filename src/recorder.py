@@ -469,6 +469,16 @@ class WebRecorder:
         self.store.flush()
         self._print_summary()
 
+        # Automatically trigger content extraction
+        try:
+            log("INFO", "Triggering automatic content extraction...")
+            from src.extractor import ContentExtractor
+            extractor = ContentExtractor(self.store.path)
+            extractor.extract()
+            log("OK", "Automatic content extraction completed!")
+        except Exception as e:
+            log("ERR", f"Automatic content extraction failed: {e}")
+
     def _print_summary(self):
         m = self.store.manifest
         print(f"\n{C['BD']}{'═'*62}{C['X']}")

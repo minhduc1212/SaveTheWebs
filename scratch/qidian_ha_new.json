@@ -1,0 +1,265 @@
+[
+  {
+    "element": "body",
+    "id": "",
+    "class": "index",
+    "data": {
+      "wrap": {
+        "top-op-box": {
+          "a": {
+            "img_src": "https://gameapp-1252317822.file.myqcloud.com/yuewen/game/images/30c3441ec8330235286969bfb2c60e21.jpg"
+          }
+        },
+        "logo-wrap": {
+          "box-center": {
+            "book-shelf": {
+              "i": "我的书架"
+            },
+            "logo": {
+              "href": "//www.qidian.com/"
+            }
+          }
+        },
+        "festival-wrap": {
+          "classify-list": {
+            "left": [
+              {
+                "info": {
+                  "i": "玄幻",
+                  "b": "721722"
+                }
+              },
+              {
+                "info": {
+                  "i": "都市",
+                  "b": "374244"
+                }
+              },
+              {
+                "info": {
+                  "i": "游戏",
+                  "b": "108311"
+                }
+              },
+              {
+                "info": {
+                  "i": "悬疑灵异",
+                  "b": "66996"
+                }
+              }
+            ],
+            "dd": [
+              {
+                "info": {
+                  "i": "奇幻",
+                  "b": "159241"
+                }
+              },
+              {
+                "info": {
+                  "i": "现实",
+                  "b": "43492"
+                }
+              },
+              {
+                "info": {
+                  "i": "体育",
+                  "b": "9109"
+                }
+              },
+              {
+                "info": {
+                  "i": "轻小说",
+                  "b": "113490"
+                }
+              }
+            ],
+            "even": [
+              {
+                "info": {
+                  "i": "武侠",
+                  "b": "45378"
+                }
+              },
+              {
+                "info": {
+                  "i": "仙侠",
+                  "b": "236460"
+                }
+              },
+              {
+                "info": {
+                  "i": "军事",
+                  "b": "20623"
+                }
+              },
+              {
+                "info": {
+                  "i": "历史",
+                  "b": "77225"
+                }
+              },
+              {
+                "info": {
+                  "i": "科幻",
+                  "b": "157333"
+                }
+              },
+              {
+                "info": {
+                  "i": "诸天无限",
+                  "b": "52280"
+                }
+              }
+            ]
+          },
+          "focus-box": {
+            "focus-slider": {
+              "ul": [
+                {
+                  "img_src": "//bossaudioandcomic-1252317822.image.myqcloud.com/activity/document/09c5bdfef3c327696f4a776c9a7c560b.jpg",
+                  "img_alt": "我的智商逐年递增"
+                },
+                {
+                  "load_src": "https://bossaudioandcomic-1252317822.image.myqcloud.com/activity/document/e11baac40d63bfc1f869fc036356980d.jpg",
+                  "load_alt": "大明太子的创业生"
+                },
+                {
+                  "load_src": "https://bossaudioandcomic-1252317822.image.myqcloud.com/activity/document/af16480639a29439a97a8a22a0ffeffb.jpg",
+                  "load_alt": "现实编程协会"
+                },
+                {
+                  "load_src": "https://bossaudioandcomic-1252317822.image.myqcloud.com/activity/document/87ad737c349fd3816ab2b96c01ce66ba.jpg",
+                  "load_alt": "咸鱼重生"
+                },
+                {
+                  "load_src": "https://gameapp-1252317822.file.myqcloud.com/yuewen/game/images/05469781e577d22cfdcbe572e497db5f.jpg",
+                  "load_alt": "航海霸业we"
+                }
+              ]
+            },
+            "focus-img": [
+              {
+                "img_src": "//readx-her-1252317822.image.myqcloud.com/yuewen-amis/backend/eecffcfd461ab4c6603eaa6272e994d2.png",
+                "img_alt": "填坑节引流-换为普通"
+              },
+              {
+                "img_src": "https://gameapp-1252317822.file.myqcloud.com/yuewen/game/images/fc741e6e1b3c368a857c8db6faba25f0.png",
+                "img_alt": "传奇正传"
+              },
+              {
+                "img_src": "//readx-her-1252317822.image.myqcloud.com/yuewen-amis/backend/3341becb1937ad3f6ae95a82a8d66bc5.png",
+                "img_alt": "我要写作"
+              }
+            ]
+          },
+          "notice-wrap": {
+            "text": "“齐鲁精神”征文大赛",
+            "href": "https://write.qq.com/portal/dashboard/actarticleDetail?id=675",
+            "notice-list": [
+              {
+                "text": "资讯 要离刺荆轲新书发布！"
+              },
+              {
+                "text": "资讯 隐为者新书来袭"
+              },
+              {
+                "text": "资讯 天子新书！"
+              },
+              {
+                "text": "资讯 九江庐山征文获奖作品"
+              },
+              {
+                "text": "百倍爆率，散人逆袭",
+                "em": "页游"
+              },
+              {
+                "text": "打造舰队，横扫大洋",
+                "em": "页游"
+              }
+            ],
+            "attention": {
+              "marquee": {
+                "text": [
+                  "缙风云支持 100W点，【成为该书白银大盟】",
+                  "人在半岛：我成了锦鲤"
+                ],
+                "href": "//www.qidian.com/book/1048825144/"
+              }
+            }
+          }
+        },
+        "index-two-wrap": {
+          "book-list-wrap": [
+            {
+              "title": "本周强推 更多 ",
+              "title_href": "//www.qidian.com/strongrec/",
+              "book-list": [
+                {
+                  "channel": {
+                    "text": "历史"
+                  },
+                  "strong": {
+                    "name_text": "北洋之梦",
+                    "name_href": "//www.qidian.com/book/1049113654/"
+                  },
+                  "author_text": "大罗罗",
+                  "author_href": "//my.qidian.com/author/2570505/"
+                },
+                {
+                  "channel": {
+                    "text": "都市"
+                  },
+                  "strong": {
+                    "name_text": "华娱申公豹",
+                    "name_href": "//www.qidian.com/book/1049108972/"
+                  },
+                  "author_text": "中贰钓鱼佬",
+                  "author_href": "//my.qidian.com/author/433825160/"
+                },
+                {
+                  "channel": {
+                    "text": "历史"
+                  },
+                  "strong": {
+                    "name_text": "红楼风华志",
+                    "name_href": "//www.qidian.com/book/1048965332/"
+                  },
+                  "author_text": "嗷世巅锋",
+                  "author_href": "//my.qidian.com/author/8940483/"
+                },
+                {
+                  "channel": {
+                    "text": "都市"
+                  },
+                  "strong": {
+                    "name_text": "华娱：功夫之王",
+                    "name_href": "//www.qidian.com/book/1047557447/"
+                  },
+                  "author_text": "搂住油菜花",
+                  "author_href": "//my.qidian.com/author/430907735/"
+                },
+                {
+                  "channel": {
+                    "text": "历史"
+                  },
+                  "strong": {
+                    "name_text": "穿在英国当贵族二代",
+                    "name_href": "//www.qidian.com/book/1048967138/"
+                  },
+                  "author_text": "胖台灯",
+                  "author_href": "//my.qidian.com/author/434450417/"
+                },
+                {
+                  "channel": {
+                    "text": "玄幻"
+                  },
+                  "strong": {
+                    "name_text": "从衔尾蛇石碑开始超凡",
+                    "name_href": "//www.qidian.com/book/1048883867/"
+                  },
+                  "author_text": "深红月",
+                  "author_href": "//my.qidian.com/author/434540497/"
+                },
+                {
+                
