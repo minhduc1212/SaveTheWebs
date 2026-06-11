@@ -765,6 +765,68 @@ body{font-family:'Inter',system-ui,sans-serif;background:var(--bg);color:var(--t
   .main-wrap,.tabs-wrap,.search-wrap,.banner{padding-left:16px;padding-right:16px}
   .assets-grid{grid-template-columns:repeat(auto-fill,minmax(150px,1fr))}
 }
+
+/* ── Hierarchical Tree View ── */
+.tree-nested {
+  margin-left: 16px;
+  border-left: 1px dashed #4b5563;
+  padding-left: 12px;
+  margin-bottom: 8px;
+}
+.tree-nested-list {
+  margin-left: 16px;
+  border-left: 1px dashed #8b5cf6;
+  padding-left: 12px;
+  margin-bottom: 8px;
+}
+.tree-list-item {
+  background: rgba(30, 41, 59, 0.5);
+  border-radius: 8px;
+  padding: 10px 14px;
+  margin-bottom: 10px;
+  border: 1px solid #334155;
+}
+.tree-key {
+  color: #a78bfa;
+  font-weight: 600;
+  font-family: monospace;
+}
+.tree-key-dict {
+  color: #60a5fa;
+  font-weight: 700;
+  cursor: pointer;
+  font-family: monospace;
+}
+.tree-key-list {
+  color: #34d399;
+  font-weight: 700;
+  cursor: pointer;
+  font-family: monospace;
+}
+.tree-val {
+  color: #e2e8f0;
+}
+.tree-img-thumb {
+  max-width: 90px;
+  max-height: 90px;
+  border-radius: 6px;
+  cursor: pointer;
+  vertical-align: middle;
+  margin: 4px 8px;
+  border: 1px solid #475569;
+  transition: transform 0.2s, box-shadow 0.2s;
+}
+.tree-img-thumb:hover {
+  transform: scale(1.08);
+  box-shadow: 0 4px 12px rgba(139, 92, 246, 0.3);
+}
+details[open] > summary {
+  margin-bottom: 6px;
+}
+summary {
+  outline: none;
+  user-select: none;
+}
 </style>
 </head>
 <body>
@@ -836,7 +898,13 @@ body{font-family:'Inter',system-ui,sans-serif;background:var(--bg);color:var(--t
         <div class="spinner"></div>
         <div>Loading extracted content...</div>
       </div>
+      <!-- Mode Toggle -->
+      <div class="mode-toggle-wrap" style="display: flex; gap: 8px; margin-bottom: 24px; border-bottom: 1px solid var(--border); padding-bottom: 12px;">
+        <button class="h-btn active" id="btn-mode-flat" onclick="switchContentMode('flat')">📄 Flat Sections</button>
+        <button class="h-btn" id="btn-mode-hierarchical" onclick="switchContentMode('hierarchical')">🌳 Hierarchical Areas</button>
+      </div>
       <div id="content-sections"></div>
+      <div id="hierarchical-areas-view" style="display: none;"></div>
     </div>
 
     <!-- Assets Tab -->
@@ -950,12 +1018,112 @@ async function loadExtractedData() {
     extractedData = await res.json();
     loading.style.display = 'none';
     renderContent(extractedData);
+    renderHierarchicalAreas(extractedData);
     renderTOC(extractedData);
     renderBanner(extractedData);
   } catch(e) {
     loading.style.display = 'none';
     sections.innerHTML = `<div class="empty-state"><div class="icon">⚠️</div><h2>Error loading data</h2><p>${e.message}</p></div>`;
   }
+}
+
+let currentContentMode = 'flat';
+
+function switchContentMode(mode) {
+  currentContentMode = mode;
+  const btnFlat = document.getElementById('btn-mode-flat');
+  const btnHier = document.getElementById('btn-mode-hierarchical');
+  const flatView = document.getElementById('content-sections');
+  const hierView = document.getElementById('hierarchical-areas-view');
+  
+  if (mode === 'flat') {
+    btnFlat.classList.add('active');
+    btnHier.classList.remove('active');
+    flatView.style.display = 'block';
+    hierView.style.display = 'none';
+  } else {
+    btnFlat.classList.remove('active');
+    btnHier.classList.add('active');
+    flatView.style.display = 'none';
+    hierView.style.display = 'block';
+  }
+}
+
+function renderTreeRecursive(val) {
+  if (val === null || val === undefined) return '<span class="tree-val">null</span>';
+  
+  if (typeof val === 'object' && !Array.isArray(val)) {
+    let html = '<div class="tree-nested">';
+    for (const [k, v] of Object.entries(val)) {
+      if (v === null || v === undefined) continue;
+      
+      const isDict = typeof v === 'object' && !Array.isArray(v);
+      const isArr = Array.isArray(v);
+      
+      if (isDict) {
+        html += `<details open><summary><span class="tree-key-dict">${escapeHtml(k)}</span></summary>${renderTreeRecursive(v)}</details>`;
+      } else if (isArr) {
+        html += `<details open><summary><span class="tree-key-list">${escapeHtml(k)} [${v.length}]</span></summary>`;
+        html += `<div class="tree-nested-list">`;
+        v.forEach(item => {
+          html += `<div class="tree-list-item">${renderTreeRecursive(item)}</div>`;
+        });
+        html += `</div></details>`;
+      } else {
+        const vStr = String(v);
+        if (k.endsWith('_src') || k.endsWith('_local') || k === 'icon_src') {
+          let src = vStr;
+          if (!src.startsWith('http') && !src.startsWith('data:')) {
+            src = `/__asset/${SNAP_ID}/${src}`;
+          }
+          html += `<div><span class="tree-key">${escapeHtml(k)}</span>: <img class="tree-img-thumb" src="${escapeHtml(src)}" onclick="openLightbox('${escapeHtml(src)}')"> <span class="tree-val">${escapeHtml(vStr)}</span></div>`;
+        } else if (k.endsWith('_href') || k === 'href') {
+          html += `<div><span class="tree-key">${escapeHtml(k)}</span>: <a href="${escapeHtml(vStr)}" target="_blank" class="tree-val">${escapeHtml(vStr)}</a></div>`;
+        } else {
+          html += `<div><span class="tree-key">${escapeHtml(k)}</span>: <span class="tree-val">${escapeHtml(vStr)}</span></div>`;
+        }
+      }
+    }
+    html += '</div>';
+    return html;
+  }
+  
+  if (Array.isArray(val)) {
+    let html = '<div class="tree-nested-list">';
+    val.forEach(item => {
+      html += `<div class="tree-list-item">${renderTreeRecursive(item)}</div>`;
+    });
+    html += '</div>';
+    return html;
+  }
+  
+  return `<span class="tree-val">${escapeHtml(String(val))}</span>`;
+}
+
+function renderHierarchicalAreas(data) {
+  const container = document.getElementById('hierarchical-areas-view');
+  if (!container) return;
+  
+  const areas = data.content && data.content.hierarchical_areas ? data.content.hierarchical_areas : [];
+  if (!areas.length) {
+    container.innerHTML = '<div class="empty-state"><div class="icon">🌳</div><h2>No hierarchical areas found</h2><p>Try re-extracting this page.</p></div>';
+    return;
+  }
+  
+  let html = '';
+  areas.forEach((area, i) => {
+    html += `<div class="content-section" style="margin-bottom: 24px; border-left: 3px solid var(--accent); padding-left: 16px;">`;
+    const tag = area.element || 'div';
+    const cls = area.class ? ` class="${area.class}"` : '';
+    const eid = area.id ? ` id="${area.id}"` : '';
+    html += `<div style="font-family: monospace; font-size: 0.85rem; color: var(--text3); margin-bottom: 12px; background: #1e293b; padding: 4px 8px; border-radius: 4px; display: inline-block;">`;
+    html += `&lt;${tag}${cls}${eid}&gt;`;
+    html += `</div>`;
+    html += renderTreeRecursive(area.data);
+    html += `</div>`;
+  });
+  
+  container.innerHTML = html;
 }
 
 function _getSections(data) {
@@ -1634,7 +1802,7 @@ class WaybackServer:
                     extractor = ContentExtractor(snap_path)
                     data = extractor.extract()
                     self._send(200, "application/json",
-                               json.dumps({"status": "ok", "snap_id": snap_id, "sections": len(data.get("sections", []))}).encode())
+                               json.dumps({"status": "ok", "snap_id": snap_id, "sections": len(data.get("content", {}).get("sections", []))}).encode())
                 except Exception as e:
                     log("ERR", f"Extraction failed for {snap_id}: {e}")
                     self._send(500, "application/json",
