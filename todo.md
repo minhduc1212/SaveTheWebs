@@ -27,3 +27,8 @@ the url in replay still go out to the real web -> make the private env that repl
 # REF
     https://github.com/internetarchive/heritrix3
     https://github.com/webrecorder/archiveweb.page
+
+
+--> remake the old code-> get the text, data of the saved web from the title, anner, all of the data in the web -> save to json, md but still all icon, image, all web flow, to know the flow of the web, replay to show data base on new struct, from the data json got prev
+
+now exact, and manage base on the type? i want to a new mode exact base n the div, the area (Ex: the div contain book: cover_img and the title of book)

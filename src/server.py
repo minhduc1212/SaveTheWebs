@@ -288,6 +288,46 @@ main {
 .tag.assets-tag { color: var(--success-color); border-color: rgba(16, 185, 129, 0.15); background: rgba(16, 185, 129, 0.03); }
 .tag.apis-tag { color: var(--info-color); border-color: rgba(14, 165, 233, 0.15); background: rgba(14, 165, 233, 0.03); }
 .tag.id-tag { color: var(--text-secondary); }
+.tag.extracted-tag { color: #f59e0b; border-color: rgba(245, 158, 11, 0.15); background: rgba(245, 158, 11, 0.03); }
+.tag.extracted-yes { color: var(--success-color); border-color: rgba(16, 185, 129, 0.15); background: rgba(16, 185, 129, 0.03); }
+.btn-extract {
+  background: rgba(245, 158, 11, 0.1);
+  color: #f59e0b;
+  border: 1px solid rgba(245, 158, 11, 0.2);
+}
+.btn-extract:hover {
+  background: rgba(245, 158, 11, 0.2);
+  border-color: rgba(245, 158, 11, 0.4);
+  box-shadow: 0 0 12px rgba(245, 158, 11, 0.1);
+}
+.btn-extract.loading {
+  opacity: 0.6;
+  pointer-events: none;
+}
+.btn-view {
+  background: rgba(16, 185, 129, 0.1);
+  color: #10b981;
+  border: 1px solid rgba(16, 185, 129, 0.2);
+}
+.btn-view:hover {
+  background: rgba(16, 185, 129, 0.2);
+  border-color: rgba(16, 185, 129, 0.4);
+  box-shadow: 0 0 12px rgba(16, 185, 129, 0.1);
+}
+.toast-container {
+  position: fixed; bottom: 24px; right: 24px; z-index: 9999;
+  display: flex; flex-direction: column; gap: 8px;
+}
+.toast {
+  background: var(--panel-color); border: 1px solid var(--border-color);
+  padding: 12px 20px; border-radius: 12px; font-size: 0.88rem;
+  backdrop-filter: blur(12px); animation: toastIn 0.3s ease;
+  box-shadow: 0 8px 24px rgba(0,0,0,0.4);
+}
+.toast.success { border-color: rgba(16, 185, 129, 0.3); color: #10b981; }
+.toast.error { border-color: rgba(239, 68, 68, 0.3); color: #ef4444; }
+.toast.info { border-color: rgba(139, 92, 246, 0.3); color: #a78bfa; }
+@keyframes toastIn { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: translateY(0); } }
 
 .snap-footer {
   margin-top: auto;
@@ -449,11 +489,13 @@ function renderCards(snaps) {
           <span class="tag assets-tag">📁 ${s.asset_count||0} assets</span>
           <span class="tag apis-tag">🔌 ${s.api_count||0} APIs</span>
           <span class="tag id-tag">📸 ${s.id}</span>
+          <span class="tag ${s.has_extracted ? 'extracted-yes' : 'extracted-tag'}">${s.has_extracted ? '✅ Extracted' : '⏳ Not extracted'}</span>
         </div>
         <div class="snap-footer">
           <div class="snap-ts">⏰ ${new Date(s.recorded_at).toLocaleString('vi-VN')}</div>
           <div class="actions">
-            <a href="/__mhtml/${s.id}" class="btn btn-secondary" target="_blank" title="Xem snapshot MHTML gốc">📄 MHTML</a>
+            <button class="btn btn-extract" onclick="triggerExtract('${s.id}', this)" title="Extract content">🔄 Extract</button>
+            <a href="/__view/${s.id}" class="btn btn-view" target="_blank" title="View structured content">📊 View</a>
             <a href="/__wb/${encodeURIComponent(s.url)}" class="btn btn-primary" target="_blank">📼 Replay</a>
           </div>
         </div>
@@ -502,68 +544,782 @@ async function loadData() {
   }
 }
 
+async function triggerExtract(snapId, btn) {
+  btn.classList.add('loading');
+  btn.innerHTML = '⏳ Extracting...';
+  try {
+    const res = await fetch(`/__archive__/api/extract/${snapId}`, {method: 'POST'});
+    const data = await res.json();
+    if (res.ok) {
+      showToast('✅ Extraction complete for ' + snapId, 'success');
+      loadData();
+    } else {
+      showToast('❌ ' + (data.error || 'Extraction failed'), 'error');
+    }
+  } catch(e) {
+    showToast('❌ Network error: ' + e.message, 'error');
+  } finally {
+    btn.classList.remove('loading');
+    btn.innerHTML = '🔄 Extract';
+  }
+}
+
+function showToast(msg, type='info') {
+  let c = document.getElementById('toasts');
+  if (!c) { c = document.createElement('div'); c.id='toasts'; c.className='toast-container'; document.body.appendChild(c); }
+  const t = document.createElement('div');
+  t.className = 'toast ' + type;
+  t.textContent = msg;
+  c.appendChild(t);
+  setTimeout(() => t.remove(), 4000);
+}
+
 loadData();
 </script>
 </body>
 </html>
 """
 
-SW_JS = r"""// Service Worker for WebRecorder Replay
-self.addEventListener('install', event => {
-  self.skipWaiting();
+# ── Structured View HTML ─────────────────────────────────────────────────────
+VIEW_HTML = r"""<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>📊 Structured View</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=Outfit:wght@600;700;800&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js"></script>
+<style>
+:root {
+  --bg: #08090f; --bg2: #0c0e18; --panel: #111422; --panel2: #161a2e;
+  --border: rgba(255,255,255,0.07); --border-h: rgba(139,92,246,0.4);
+  --text1: #f1f5f9; --text2: #94a3b8; --text3: #64748b;
+  --accent: #8b5cf6; --accent2: #a78bfa; --accent-g: rgba(139,92,246,0.12);
+  --green: #10b981; --blue: #0ea5e9; --amber: #f59e0b; --red: #ef4444;
+  --radius: 14px; --radius-sm: 8px;
+}
+*{box-sizing:border-box;margin:0;padding:0}
+html{scroll-behavior:smooth}
+body{font-family:'Inter',system-ui,sans-serif;background:var(--bg);color:var(--text1);min-height:100vh;line-height:1.6}
+::-webkit-scrollbar{width:6px;height:6px}
+::-webkit-scrollbar-track{background:transparent}
+::-webkit-scrollbar-thumb{background:rgba(139,92,246,0.3);border-radius:3px}
+
+/* ── Header ── */
+.view-header{
+  background:linear-gradient(180deg,rgba(17,20,34,0.95) 0%,rgba(8,9,15,0.8) 100%);
+  backdrop-filter:blur(20px);border-bottom:1px solid var(--border);
+  padding:20px 32px;position:sticky;top:0;z-index:100;
+}
+.header-inner{max-width:1800px;margin:0 auto;display:flex;align-items:center;gap:16px;flex-wrap:wrap}
+.header-favicon{width:40px;height:40px;border-radius:10px;background:var(--panel2);border:1px solid var(--border);display:flex;align-items:center;justify-content:center;overflow:hidden;flex-shrink:0}
+.header-favicon img{width:24px;height:24px;object-fit:contain}
+.header-info{flex:1;min-width:0}
+.header-title{font-family:'Outfit',sans-serif;font-size:1.3rem;font-weight:700;background:linear-gradient(135deg,#a78bfa,#8b5cf6,#6366f1);-webkit-background-clip:text;-webkit-text-fill-color:transparent;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.header-meta{display:flex;gap:12px;align-items:center;flex-wrap:wrap;margin-top:2px}
+.header-meta span{font-size:0.8rem;color:var(--text2);display:flex;align-items:center;gap:4px}
+.header-actions{display:flex;gap:8px;flex-shrink:0}
+.h-btn{padding:8px 14px;border-radius:var(--radius-sm);font-size:0.82rem;font-weight:600;text-decoration:none;cursor:pointer;border:1px solid var(--border);background:rgba(255,255,255,0.03);color:var(--text1);display:inline-flex;align-items:center;gap:6px;transition:all 0.2s}
+.h-btn:hover{border-color:var(--border-h);background:var(--accent-g);box-shadow:0 0 15px var(--accent-g)}
+.h-btn.primary{background:var(--accent);border-color:var(--accent);color:#fff}
+.h-btn.primary:hover{background:#7c3aed;box-shadow:0 0 20px var(--accent-g)}
+
+/* ── Banner ── */
+.banner{max-width:1800px;margin:0 auto;padding:0 32px}
+.banner img{width:100%;max-height:280px;object-fit:cover;border-radius:0 0 var(--radius) var(--radius);border:1px solid var(--border);border-top:none}
+
+/* ── Search Bar ── */
+.search-wrap{max-width:1800px;margin:16px auto;padding:0 32px}
+.search-input{width:100%;padding:12px 16px 12px 44px;border-radius:var(--radius);border:1px solid var(--border);background:var(--panel);color:var(--text1);font-size:0.92rem;outline:none;transition:all 0.25s}
+.search-input:focus{border-color:var(--accent);box-shadow:0 0 20px var(--accent-g)}
+.search-wrap{position:relative}
+.search-wrap::before{content:"🔍";position:absolute;left:46px;top:50%;transform:translateY(-50%);font-size:1rem;opacity:0.5;z-index:1}
+
+/* ── Tabs ── */
+.tabs-wrap{max-width:1800px;margin:0 auto;padding:8px 32px 0}
+.tabs{display:flex;gap:4px;border-bottom:1px solid var(--border);overflow-x:auto}
+.tab{padding:10px 20px;font-size:0.88rem;font-weight:600;color:var(--text3);cursor:pointer;border-bottom:2px solid transparent;transition:all 0.2s;white-space:nowrap;user-select:none}
+.tab:hover{color:var(--text2)}
+.tab.active{color:var(--accent2);border-bottom-color:var(--accent)}
+
+/* ── Layout ── */
+.main-wrap{max-width:1800px;margin:0 auto;padding:16px 32px 40px;display:flex;gap:24px}
+.sidebar{width:260px;flex-shrink:0;position:sticky;top:90px;max-height:calc(100vh - 110px);overflow-y:auto}
+.sidebar-section{background:var(--panel);border:1px solid var(--border);border-radius:var(--radius);padding:16px;margin-bottom:16px}
+.sidebar-title{font-family:'Outfit',sans-serif;font-size:0.85rem;font-weight:700;text-transform:uppercase;letter-spacing:1px;color:var(--text3);margin-bottom:12px;display:flex;align-items:center;gap:6px}
+.toc-list{list-style:none}
+.toc-item{padding:6px 10px;font-size:0.82rem;color:var(--text2);border-radius:6px;cursor:pointer;transition:all 0.15s;border-left:2px solid transparent;margin-bottom:2px}
+.toc-item:hover{background:rgba(139,92,246,0.08);color:var(--text1);border-left-color:var(--accent)}
+.toc-item.active{background:var(--accent-g);color:var(--accent2);border-left-color:var(--accent)}
+.toc-item.h3{padding-left:20px;font-size:0.78rem}
+.nav-link{display:block;padding:8px 12px;font-size:0.82rem;color:var(--blue);border-radius:6px;text-decoration:none;transition:all 0.15s;word-break:break-all}
+.nav-link:hover{background:rgba(14,165,233,0.08)}
+.asset-mini{display:flex;align-items:center;gap:8px;padding:6px 8px;font-size:0.78rem;color:var(--text2);border-radius:6px;transition:all 0.15s;cursor:default}
+.asset-mini:hover{background:rgba(255,255,255,0.03)}
+.asset-mini .dot{width:6px;height:6px;border-radius:50%;flex-shrink:0}
+.asset-mini .name{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.asset-mini .size{color:var(--text3);flex-shrink:0}
+
+.content-area{flex:1;min-width:0}
+.tab-panel{display:none}
+.tab-panel.active{display:block}
+
+/* ── Content Panel ── */
+.content-section{background:var(--panel);border:1px solid var(--border);border-radius:var(--radius);padding:28px 32px;margin-bottom:20px;transition:border-color 0.3s}
+.content-section:hover{border-color:rgba(139,92,246,0.15)}
+.content-section h2{font-family:'Outfit',sans-serif;font-size:1.4rem;font-weight:700;margin-bottom:12px;background:linear-gradient(135deg,var(--accent2),var(--accent));-webkit-background-clip:text;-webkit-text-fill-color:transparent}
+.content-section h3{font-size:1.1rem;font-weight:600;margin:16px 0 8px;color:var(--text1)}
+.content-section p{color:var(--text2);margin-bottom:12px;line-height:1.7}
+.content-section ul,.content-section ol{color:var(--text2);margin:0 0 12px 20px}
+.content-section li{margin-bottom:4px;line-height:1.6}
+.content-section img{max-width:100%;border-radius:var(--radius-sm);border:1px solid var(--border);cursor:pointer;transition:all 0.3s;margin:8px 0}
+.content-section img:hover{border-color:var(--border-h);box-shadow:0 8px 30px rgba(0,0,0,0.4)}
+.content-section table{width:100%;border-collapse:collapse;margin:12px 0;font-size:0.88rem}
+.content-section th{background:var(--panel2);color:var(--text1);padding:10px 14px;text-align:left;font-weight:600;border:1px solid var(--border)}
+.content-section td{padding:10px 14px;border:1px solid var(--border);color:var(--text2)}
+.content-section pre{background:var(--bg2);border:1px solid var(--border);border-radius:var(--radius-sm);padding:16px;overflow-x:auto;font-family:'JetBrains Mono',monospace;font-size:0.85rem;color:var(--accent2);margin:12px 0}
+.content-section code{font-family:'JetBrains Mono',monospace;font-size:0.85rem;background:rgba(139,92,246,0.1);padding:2px 6px;border-radius:4px;color:var(--accent2)}
+.content-section pre code{background:none;padding:0}
+.content-section a{color:var(--blue);text-decoration:none}
+.content-section a:hover{text-decoration:underline}
+.content-section blockquote{border-left:3px solid var(--accent);padding:12px 20px;margin:12px 0;background:rgba(139,92,246,0.05);border-radius:0 var(--radius-sm) var(--radius-sm) 0;color:var(--text2);font-style:italic}
+
+/* ── Assets Grid ── */
+.assets-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:16px}
+.asset-card{background:var(--panel);border:1px solid var(--border);border-radius:var(--radius);overflow:hidden;transition:all 0.3s;cursor:pointer}
+.asset-card:hover{border-color:var(--border-h);transform:translateY(-3px);box-shadow:0 8px 25px rgba(0,0,0,0.3)}
+.asset-preview{height:140px;background:var(--bg2);display:flex;align-items:center;justify-content:center;overflow:hidden}
+.asset-preview img{max-width:100%;max-height:100%;object-fit:contain}
+.asset-preview .icon-preview{font-size:3rem;opacity:0.4}
+.asset-info{padding:12px}
+.asset-name{font-size:0.8rem;font-weight:500;color:var(--text1);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.asset-detail{font-size:0.72rem;color:var(--text3);margin-top:4px;display:flex;justify-content:space-between}
+
+/* ── Flow ── */
+.flow-container{background:var(--panel);border:1px solid var(--border);border-radius:var(--radius);padding:24px;overflow-x:auto}
+.flow-container .mermaid{display:flex;justify-content:center}
+.flow-timeline{margin-top:24px}
+.flow-entry{display:flex;gap:16px;padding:12px 16px;border-left:2px solid var(--border);margin-left:20px;position:relative;transition:all 0.2s}
+.flow-entry:hover{background:rgba(139,92,246,0.04);border-left-color:var(--accent)}
+.flow-entry::before{content:"";position:absolute;left:-6px;top:16px;width:10px;height:10px;border-radius:50%;background:var(--panel2);border:2px solid var(--accent);z-index:1}
+.flow-entry.nav::before{border-color:var(--blue)}
+.flow-entry.api::before{border-color:var(--green)}
+.flow-type{font-size:0.72rem;font-weight:700;text-transform:uppercase;letter-spacing:0.5px;padding:2px 8px;border-radius:4px;flex-shrink:0;height:fit-content;margin-top:2px}
+.flow-type.nav{color:var(--blue);background:rgba(14,165,233,0.1)}
+.flow-type.api{color:var(--green);background:rgba(16,185,129,0.1)}
+.flow-url{font-size:0.85rem;color:var(--text2);word-break:break-all;flex:1}
+.flow-status{font-size:0.78rem;color:var(--text3);flex-shrink:0}
+
+/* ── Raw / Markdown ── */
+.raw-frame{width:100%;height:calc(100vh - 200px);border:1px solid var(--border);border-radius:var(--radius);background:var(--bg)}
+.md-toolbar{display:flex;gap:8px;margin-bottom:12px}
+.md-content{background:var(--panel);border:1px solid var(--border);border-radius:var(--radius);padding:32px;max-height:calc(100vh - 240px);overflow-y:auto}
+.md-content h1,.md-content h2,.md-content h3{font-family:'Outfit',sans-serif;color:var(--text1);margin:20px 0 8px}
+.md-content h1{font-size:1.6rem;font-weight:800}
+.md-content h2{font-size:1.3rem;font-weight:700}
+.md-content h3{font-size:1.1rem;font-weight:600}
+.md-content p{color:var(--text2);line-height:1.7;margin-bottom:12px}
+.md-content a{color:var(--blue)}
+.md-content img{max-width:100%;border-radius:var(--radius-sm)}
+.md-content pre{background:var(--bg2);padding:16px;border-radius:var(--radius-sm);overflow-x:auto;font-family:'JetBrains Mono',monospace;font-size:0.85rem;color:var(--accent2)}
+.md-content code{font-family:'JetBrains Mono',monospace;background:rgba(139,92,246,0.1);padding:2px 6px;border-radius:4px;font-size:0.85rem;color:var(--accent2)}
+.md-content pre code{background:none;padding:0}
+.md-content blockquote{border-left:3px solid var(--accent);padding:8px 16px;margin:12px 0;background:rgba(139,92,246,0.05);color:var(--text2)}
+.md-content table{width:100%;border-collapse:collapse;margin:12px 0}
+.md-content th{background:var(--panel2);padding:8px 12px;text-align:left;border:1px solid var(--border);font-weight:600}
+.md-content td{padding:8px 12px;border:1px solid var(--border);color:var(--text2)}
+
+/* ── Lightbox ── */
+.lightbox{position:fixed;inset:0;background:rgba(0,0,0,0.92);backdrop-filter:blur(20px);z-index:9999;display:none;align-items:center;justify-content:center;cursor:zoom-out}
+.lightbox.open{display:flex}
+.lightbox img{max-width:92vw;max-height:92vh;object-fit:contain;border-radius:var(--radius);box-shadow:0 20px 60px rgba(0,0,0,0.5)}
+.lightbox-close{position:absolute;top:20px;right:24px;font-size:1.8rem;color:var(--text2);cursor:pointer;background:rgba(0,0,0,0.5);width:44px;height:44px;border-radius:50%;display:flex;align-items:center;justify-content:center;transition:all 0.2s}
+.lightbox-close:hover{color:#fff;background:var(--accent)}
+
+/* ── Loading / Empty ── */
+.loading-state{text-align:center;padding:80px 40px}
+.spinner{display:inline-block;width:44px;height:44px;border:4px solid var(--border);border-top-color:var(--accent);border-radius:50%;animation:spin 0.8s linear infinite;margin-bottom:16px}
+@keyframes spin{to{transform:rotate(360deg)}}
+.empty-state{text-align:center;padding:80px 40px;background:var(--panel);border:1px solid var(--border);border-radius:var(--radius)}
+.empty-state .icon{font-size:4rem;margin-bottom:16px}
+.empty-state h2{font-family:'Outfit',sans-serif;font-size:1.4rem;font-weight:700;margin-bottom:8px}
+.empty-state p{color:var(--text2);margin-bottom:20px}
+.extract-btn{padding:12px 28px;border-radius:var(--radius-sm);background:var(--accent);color:#fff;font-size:0.95rem;font-weight:600;border:none;cursor:pointer;transition:all 0.2s;display:inline-flex;align-items:center;gap:8px}
+.extract-btn:hover{background:#7c3aed;box-shadow:0 0 25px var(--accent-g)}
+.extract-btn.loading{opacity:0.6;pointer-events:none}
+
+/* ── Toast ── */
+.toast-box{position:fixed;bottom:24px;right:24px;z-index:99999;display:flex;flex-direction:column;gap:8px}
+.toast-msg{background:var(--panel);border:1px solid var(--border);padding:12px 20px;border-radius:var(--radius);font-size:0.88rem;backdrop-filter:blur(12px);animation:toastSlide 0.3s ease;box-shadow:0 8px 30px rgba(0,0,0,0.5)}
+.toast-msg.success{border-color:rgba(16,185,129,0.3);color:var(--green)}
+.toast-msg.error{border-color:rgba(239,68,68,0.3);color:var(--red)}
+@keyframes toastSlide{from{opacity:0;transform:translateY(12px)}to{opacity:1;transform:translateY(0)}}
+
+/* ── Responsive ── */
+@media(max-width:900px){
+  .main-wrap{flex-direction:column}
+  .sidebar{width:100%;position:static;max-height:none}
+  .view-header{padding:16px 20px}
+  .main-wrap,.tabs-wrap,.search-wrap,.banner{padding-left:16px;padding-right:16px}
+  .assets-grid{grid-template-columns:repeat(auto-fill,minmax(150px,1fr))}
+}
+</style>
+</head>
+<body>
+<!-- Header -->
+<div class="view-header">
+  <div class="header-inner">
+    <div class="header-favicon" id="hdr-favicon"></div>
+    <div class="header-info">
+      <div class="header-title" id="hdr-title">Loading...</div>
+      <div class="header-meta">
+        <span id="hdr-domain">🌐 ...</span>
+        <span id="hdr-date">📅 ...</span>
+        <span id="hdr-id">🔗 ...</span>
+      </div>
+    </div>
+    <div class="header-actions">
+      <a href="/__archive__" class="h-btn">← Dashboard</a>
+      <button class="h-btn" onclick="downloadJSON()" id="btn-dl-json">📥 JSON</button>
+      <button class="h-btn" onclick="downloadMD()" id="btn-dl-md">📥 MD</button>
+      <a href="" class="h-btn primary" id="btn-replay" target="_blank">📼 Replay</a>
+    </div>
+  </div>
+</div>
+
+<!-- Banner -->
+<div class="banner" id="banner-wrap" style="display:none">
+  <img id="banner-img" alt="Banner" onclick="openLightbox(this.src)">
+</div>
+
+<!-- Search -->
+<div class="search-wrap">
+  <input type="text" class="search-input" id="content-search" placeholder="Search within content..." oninput="filterContent(this.value)">
+</div>
+
+<!-- Tabs -->
+<div class="tabs-wrap">
+  <div class="tabs" id="tabs">
+    <div class="tab active" data-tab="content">📄 Content</div>
+    <div class="tab" data-tab="assets">🖼️ Assets</div>
+    <div class="tab" data-tab="flow">🔀 Flow</div>
+    <div class="tab" data-tab="raw">🌐 Raw HTML</div>
+    <div class="tab" data-tab="markdown">📝 Markdown</div>
+  </div>
+</div>
+
+<!-- Main Layout -->
+<div class="main-wrap">
+  <!-- Sidebar -->
+  <aside class="sidebar" id="sidebar">
+    <div class="sidebar-section">
+      <div class="sidebar-title">📑 Table of Contents</div>
+      <ul class="toc-list" id="toc-list"></ul>
+    </div>
+    <div class="sidebar-section" id="sidebar-nav" style="display:none">
+      <div class="sidebar-title">🔗 Navigation</div>
+      <div id="nav-links"></div>
+    </div>
+    <div class="sidebar-section" id="sidebar-assets" style="display:none">
+      <div class="sidebar-title">📁 Assets <span id="asset-count" style="color:var(--text3)"></span></div>
+      <div id="asset-list-mini"></div>
+    </div>
+  </aside>
+
+  <!-- Content Area -->
+  <div class="content-area">
+    <!-- Content Tab -->
+    <div class="tab-panel active" id="panel-content">
+      <div class="loading-state" id="content-loading">
+        <div class="spinner"></div>
+        <div>Loading extracted content...</div>
+      </div>
+      <div id="content-sections"></div>
+    </div>
+
+    <!-- Assets Tab -->
+    <div class="tab-panel" id="panel-assets">
+      <div class="assets-grid" id="assets-grid"></div>
+    </div>
+
+    <!-- Flow Tab -->
+    <div class="tab-panel" id="panel-flow">
+      <div class="flow-container" id="flow-diagram"></div>
+      <div class="flow-timeline" id="flow-timeline"></div>
+    </div>
+
+    <!-- Raw HTML Tab -->
+    <div class="tab-panel" id="panel-raw">
+      <iframe class="raw-frame" id="raw-iframe" sandbox="allow-scripts allow-same-origin"></iframe>
+    </div>
+
+    <!-- Markdown Tab -->
+    <div class="tab-panel" id="panel-markdown">
+      <div class="md-toolbar">
+        <button class="h-btn" onclick="copyMarkdown()">📋 Copy Markdown</button>
+        <button class="h-btn" onclick="downloadMD()">📥 Download .md</button>
+      </div>
+      <div class="md-content" id="md-rendered"></div>
+    </div>
+  </div>
+</div>
+
+<!-- Lightbox -->
+<div class="lightbox" id="lightbox" onclick="closeLightbox()">
+  <div class="lightbox-close">✕</div>
+  <img id="lightbox-img" src="" alt="Preview">
+</div>
+
+<!-- Toast Container -->
+<div class="toast-box" id="toast-box"></div>
+
+<script>
+const SNAP_ID = '{{SNAP_ID}}';
+let extractedData = null;
+let markdownContent = '';
+let snapInfo = null;
+
+// ── Init ──
+document.addEventListener('DOMContentLoaded', async () => {
+  mermaid.initialize({ theme: 'dark', themeVariables: { primaryColor: '#8b5cf6', primaryTextColor: '#f1f5f9', lineColor: '#64748b', primaryBorderColor: '#8b5cf6' }});
+
+  // Tab switching
+  document.querySelectorAll('.tab').forEach(tab => {
+    tab.addEventListener('click', () => {
+      document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+      document.querySelectorAll('.tab-panel').forEach(p => p.classList.remove('active'));
+      tab.classList.add('active');
+      document.getElementById('panel-' + tab.dataset.tab).classList.add('active');
+      // Show/hide sidebar based on tab
+      const sb = document.getElementById('sidebar');
+      sb.style.display = ['content','markdown'].includes(tab.dataset.tab) ? '' : 'none';
+      // Load raw iframe on demand
+      if (tab.dataset.tab === 'raw' && snapInfo) {
+        const iframe = document.getElementById('raw-iframe');
+        if (!iframe.src || iframe.src === 'about:blank') {
+          iframe.src = '/__wb/' + encodeURIComponent(snapInfo.url);
+        }
+      }
+    });
+  });
+
+  await loadSnapInfo();
+  await loadExtractedData();
+  await loadMarkdown();
+  await loadAssets();
+  await loadFlow();
 });
 
-self.addEventListener('activate', event => {
-  event.waitUntil(self.clients.claim());
-});
-
-self.addEventListener('fetch', event => {
-  const url = new URL(event.request.url);
-  
-  // Bỏ qua các request đến hệ thống của archive
-  if (url.origin === self.location.origin) {
-    if (url.pathname.startsWith('/__archive__') || 
-        url.pathname.startsWith('/__wb/') || 
-        url.pathname.startsWith('/__mhtml/') || 
-        url.pathname === '/sw.js') {
-      return; // Để server tự xử lý
+// ── Load snap info ──
+async function loadSnapInfo() {
+  try {
+    const res = await fetch('/__archive__/api/snapshots');
+    const snaps = await res.json();
+    snapInfo = snaps.find(s => s.id === SNAP_ID);
+    if (snapInfo) {
+      const cleanDomain = snapInfo.domain.replace(/_/g, ':');
+      document.getElementById('hdr-title').textContent = snapInfo.title || snapInfo.url;
+      document.getElementById('hdr-domain').innerHTML = '🌐 ' + cleanDomain;
+      document.getElementById('hdr-date').innerHTML = '📅 ' + new Date(snapInfo.recorded_at).toLocaleString();
+      document.getElementById('hdr-id').innerHTML = '🔗 ' + snapInfo.id;
+      document.getElementById('hdr-favicon').innerHTML = `<img src="https://www.google.com/s2/favicons?sz=64&domain=${cleanDomain}" onerror="this.parentElement.innerHTML='📄'" alt="">`;
+      document.getElementById('btn-replay').href = '/__wb/' + encodeURIComponent(snapInfo.url);
     }
+  } catch(e) { console.error('Failed to load snap info', e); }
+}
+
+// ── Load extracted data ──
+async function loadExtractedData() {
+  const loading = document.getElementById('content-loading');
+  const sections = document.getElementById('content-sections');
+  try {
+    const res = await fetch(`/__archive__/api/extracted/${SNAP_ID}`);
+    if (!res.ok) {
+      loading.style.display = 'none';
+      sections.innerHTML = `
+        <div class="empty-state">
+          <div class="icon">📊</div>
+          <h2>No extracted data yet</h2>
+          <p>Content has not been extracted for this snapshot.</p>
+          <button class="extract-btn" onclick="triggerExtract(this)">🔄 Extract Now</button>
+        </div>`;
+      return;
+    }
+    extractedData = await res.json();
+    loading.style.display = 'none';
+    renderContent(extractedData);
+    renderTOC(extractedData);
+    renderBanner(extractedData);
+  } catch(e) {
+    loading.style.display = 'none';
+    sections.innerHTML = `<div class="empty-state"><div class="icon">⚠️</div><h2>Error loading data</h2><p>${e.message}</p></div>`;
+  }
+}
+
+function _getSections(data) {
+  if (!data) return [];
+  if (data.sections && Array.isArray(data.sections)) return data.sections;
+  if (data.content) {
+    if (Array.isArray(data.content)) return data.content;
+    if (data.content.sections && Array.isArray(data.content.sections)) return data.content.sections;
+  }
+  return [];
+}
+
+// ── Render content sections ──
+function renderContent(data) {
+  const container = document.getElementById('content-sections');
+  const contentSections = _getSections(data);
+  if (!contentSections.length && data.text) {
+    container.innerHTML = `<div class="content-section"><div>${escapeHtml(data.text)}</div></div>`;
+    return;
+  }
+  let html = '';
+  contentSections.forEach((sec, i) => {
+    html += `<div class="content-section" id="section-${i}">`;
+    if (sec.heading || sec.title) {
+      html += `<h2>${escapeHtml(sec.heading || sec.title)}</h2>`;
+    }
+    if (sec.content || sec.text || sec.body) {
+      const text = sec.content || sec.text || sec.body;
+      if (typeof text === 'string') {
+        html += renderTextContent(text);
+      } else if (Array.isArray(text)) {
+        text.forEach(item => {
+          if (typeof item === 'string') html += `<p>${escapeHtml(item)}</p>`;
+          else if (item.type === 'image' || item.src) html += renderImage(item);
+          else if (item.type === 'table') html += renderTable(item);
+          else if (item.type === 'list') html += renderList(item);
+          else if (item.type === 'code') html += `<pre><code>${escapeHtml(item.code || item.content || '')}</code></pre>`;
+          else if (item.type === 'heading') html += `<h3>${escapeHtml(item.text || item.content || '')}</h3>`;
+          else if (item.type === 'blockquote') html += `<blockquote>${escapeHtml(item.text || item.content || '')}</blockquote>`;
+          else if (item.text || item.content) html += `<p>${escapeHtml(item.text || item.content)}</p>`;
+        });
+      }
+    }
+    if (sec.images && Array.isArray(sec.images)) {
+      sec.images.forEach(img => { html += renderImage(img); });
+    }
+    if (sec.subsections && Array.isArray(sec.subsections)) {
+      sec.subsections.forEach(sub => {
+        if (sub.heading || sub.title) html += `<h3>${escapeHtml(sub.heading || sub.title)}</h3>`;
+        if (sub.content || sub.text) html += renderTextContent(sub.content || sub.text);
+      });
+    }
+    html += `</div>`;
+  });
+  container.innerHTML = html || '<div class="empty-state"><div class="icon">📭</div><h2>No content sections found</h2></div>';
+
+  // Click handler for images
+  container.querySelectorAll('img').forEach(img => {
+    img.addEventListener('click', () => openLightbox(img.src));
+  });
+}
+
+function renderTextContent(text) {
+  if (typeof text !== 'string') return '';
+  // Simple markdown-like rendering
+  return text.split('\n').map(line => {
+    line = line.trim();
+    if (!line) return '';
+    if (line.startsWith('### ')) return `<h3>${escapeHtml(line.slice(4))}</h3>`;
+    if (line.startsWith('## ')) return `<h3>${escapeHtml(line.slice(3))}</h3>`;
+    if (line.startsWith('# ')) return `<h2>${escapeHtml(line.slice(2))}</h2>`;
+    if (line.startsWith('- ') || line.startsWith('* ')) return `<li>${escapeHtml(line.slice(2))}</li>`;
+    if (line.startsWith('> ')) return `<blockquote>${escapeHtml(line.slice(2))}</blockquote>`;
+    if (line.startsWith('```')) return '';
+    return `<p>${escapeHtml(line)}</p>`;
+  }).join('');
+}
+
+function renderImage(img) {
+  let src = img.src || img.url || img;
+  if (typeof src === 'string' && !src.startsWith('http') && !src.startsWith('data:')) {
+    src = `/__asset/${SNAP_ID}/${src}`;
+  }
+  const alt = img.alt || img.caption || '';
+  return `<img src="${escapeHtml(src)}" alt="${escapeHtml(alt)}" loading="lazy" title="${escapeHtml(alt)}">`;
+}
+
+function renderTable(tbl) {
+  if (!tbl.rows || !tbl.rows.length) return '';
+  let h = '<table>';
+  if (tbl.headers) {
+    h += '<tr>' + tbl.headers.map(th => `<th>${escapeHtml(th)}</th>`).join('') + '</tr>';
+  }
+  tbl.rows.forEach(row => {
+    const cells = Array.isArray(row) ? row : Object.values(row);
+    h += '<tr>' + cells.map(c => `<td>${escapeHtml(String(c))}</td>`).join('') + '</tr>';
+  });
+  return h + '</table>';
+}
+
+function renderList(list) {
+  const items = list.items || list.content || [];
+  const tag = list.ordered ? 'ol' : 'ul';
+  return `<${tag}>${items.map(i => `<li>${escapeHtml(typeof i === 'string' ? i : i.text || '')}</li>`).join('')}</${tag}>`;
+}
+
+// ── TOC ──
+function renderTOC(data) {
+  const toc = document.getElementById('toc-list');
+  const sections = _getSections(data);
+  if (!sections.length) { toc.innerHTML = '<li class="toc-item" style="color:var(--text3)">No sections</li>'; return; }
+  toc.innerHTML = sections.map((sec, i) => {
+    const title = sec.heading || sec.title || `Section ${i+1}`;
+    let items = `<li class="toc-item" onclick="scrollToSection(${i})">${escapeHtml(title)}</li>`;
+    if (sec.subsections) {
+      sec.subsections.forEach(sub => {
+        if (sub.heading || sub.title) items += `<li class="toc-item h3">${escapeHtml(sub.heading || sub.title)}</li>`;
+      });
+    }
+    return items;
+  }).join('');
+}
+
+function renderBanner(data) {
+  const banner = data.banner || data.og_image || data.featured_image;
+  if (banner) {
+    let src = banner;
+    if (typeof src === 'string' && !src.startsWith('http') && !src.startsWith('data:')) {
+      src = `/__asset/${SNAP_ID}/${src}`;
+    }
+    document.getElementById('banner-img').src = src;
+    document.getElementById('banner-wrap').style.display = '';
+  }
+}
+
+function scrollToSection(i) {
+  const el = document.getElementById('section-' + i);
+  if (el) { el.scrollIntoView({behavior:'smooth', block:'start'}); }
+  // Update active TOC item
+  document.querySelectorAll('.toc-item').forEach((t, idx) => {
+    t.classList.toggle('active', idx === i);
+  });
+}
+
+// ── Markdown ──
+async function loadMarkdown() {
+  try {
+    const res = await fetch(`/__archive__/api/content/${SNAP_ID}`);
+    if (res.ok) {
+      markdownContent = await res.text();
+      if (typeof marked !== 'undefined') {
+        marked.setOptions({ breaks: true, gfm: true });
+        document.getElementById('md-rendered').innerHTML = marked.parse(markdownContent);
+      } else {
+        document.getElementById('md-rendered').innerHTML = `<pre>${escapeHtml(markdownContent)}</pre>`;
+      }
+    } else {
+      document.getElementById('md-rendered').innerHTML = '<div class="empty-state"><div class="icon">📝</div><h2>No markdown content</h2><p>Extract the snapshot first to generate markdown.</p></div>';
+    }
+  } catch(e) {
+    document.getElementById('md-rendered').innerHTML = `<p style="color:var(--red)">Error: ${e.message}</p>`;
+  }
+}
+
+// ── Assets ──
+async function loadAssets() {
+  try {
+    const res = await fetch(`/__archive__/api/assets/${SNAP_ID}`);
+    if (!res.ok) return;
+    const assets = await res.json();
+    renderAssetsGrid(assets);
+    renderAssetsSidebar(assets);
+  } catch(e) { console.error('Failed to load assets', e); }
+}
+
+function renderAssetsGrid(assets) {
+  const grid = document.getElementById('assets-grid');
+  if (!assets.length) {
+    grid.innerHTML = '<div class="empty-state"><div class="icon">📁</div><h2>No assets found</h2></div>';
+    return;
+  }
+  const imageExts = ['jpg','jpeg','png','gif','webp','svg','ico','bmp','avif'];
+  grid.innerHTML = assets.map(a => {
+    const ext = (a.name || '').split('.').pop().toLowerCase();
+    const isImg = imageExts.includes(ext) || (a.type && a.type.startsWith('image'));
+    const src = `/__asset/${SNAP_ID}/${a.path || a.name}`;
+    const sizeStr = a.size ? formatSize(a.size) : '';
+    return `
+      <div class="asset-card" onclick="${isImg ? `openLightbox('${src}')` : ''}">
+        <div class="asset-preview">
+          ${isImg ? `<img src="${src}" alt="${escapeHtml(a.name)}" loading="lazy">` : `<div class="icon-preview">${getFileIcon(ext)}</div>`}
+        </div>
+        <div class="asset-info">
+          <div class="asset-name" title="${escapeHtml(a.path || a.name)}">${escapeHtml(a.name)}</div>
+          <div class="asset-detail"><span>${ext.toUpperCase()}</span><span>${sizeStr}</span></div>
+        </div>
+      </div>`;
+  }).join('');
+}
+
+function renderAssetsSidebar(assets) {
+  if (!assets.length) return;
+  document.getElementById('sidebar-assets').style.display = '';
+  document.getElementById('asset-count').textContent = `(${assets.length})`;
+  const mini = document.getElementById('asset-list-mini');
+  const imageExts = ['jpg','jpeg','png','gif','webp','svg','ico'];
+  mini.innerHTML = assets.slice(0, 20).map(a => {
+    const ext = (a.name || '').split('.').pop().toLowerCase();
+    const color = imageExts.includes(ext) ? 'var(--green)' : ext === 'js' ? 'var(--amber)' : ext === 'css' ? 'var(--blue)' : 'var(--text3)';
+    return `<div class="asset-mini"><span class="dot" style="background:${color}"></span><span class="name">${escapeHtml(a.name)}</span><span class="size">${a.size ? formatSize(a.size) : ''}</span></div>`;
+  }).join('');
+  if (assets.length > 20) mini.innerHTML += `<div class="asset-mini" style="color:var(--text3);justify-content:center">+${assets.length - 20} more</div>`;
+}
+
+// ── Flow ──
+async function loadFlow() {
+  try {
+    const res = await fetch(`/__archive__/api/flow/${SNAP_ID}`);
+    if (!res.ok) return;
+    const flow = await res.json();
+    renderFlow(flow);
+  } catch(e) { console.error('Failed to load flow', e); }
+}
+
+function renderFlow(flow) {
+  const entries = flow.navigations || flow.entries || flow || [];
+  if (!Array.isArray(entries) || !entries.length) {
+    document.getElementById('flow-diagram').innerHTML = '<div class="empty-state"><div class="icon">🔀</div><h2>No flow data</h2></div>';
+    return;
   }
 
-  // Chặn request và chuyển hướng vào proxy /__wb/
-  event.respondWith((async () => {
-    const client = await clients.get(event.clientId);
-    let targetUrl = event.request.url;
+  // Build mermaid diagram
+  let mmd = 'graph LR\n';
+  const nodes = [];
+  entries.forEach((e, i) => {
+    const label = (e.url || e.path || '').replace(/https?:\/\//, '').slice(0, 40);
+    const type = e.type || (e.method ? 'api' : 'nav');
+    const cls = type === 'api' ? ':::api' : ':::nav';
+    nodes.push(`  N${i}["${label.replace(/"/g, '#quot;')}"]${cls}`);
+    if (i > 0) mmd += `  N${i-1} --> N${i}\n`;
+  });
+  mmd += nodes.join('\n') + '\n';
+  mmd += '  classDef nav fill:#0c4a6e,stroke:#0ea5e9,color:#e0f2fe\n';
+  mmd += '  classDef api fill:#064e3b,stroke:#10b981,color:#d1fae5\n';
 
-    if (url.origin === self.location.origin) {
-       if (client && client.url) {
-         const clientUrl = new URL(client.url);
-         if (clientUrl.pathname.startsWith('/__wb/')) {
-            let pageUrlEncoded = clientUrl.pathname.substring(6) + clientUrl.search + clientUrl.hash;
-            let pageUrl = decodeURIComponent(pageUrlEncoded);
-            targetUrl = new URL(url.pathname + url.search + url.hash, pageUrl).href;
-         }
-       }
-    }
+  const diagramEl = document.getElementById('flow-diagram');
+  diagramEl.innerHTML = `<div class="mermaid">${mmd}</div>`;
+  try { mermaid.run({ nodes: diagramEl.querySelectorAll('.mermaid') }); } catch(e) { console.warn('Mermaid render failed', e); }
 
-    const proxyUrl = self.location.origin + '/__wb/' + encodeURIComponent(targetUrl);
-    
-    const requestArgs = {
-      method: event.request.method,
-      headers: event.request.headers,
-      mode: 'cors',
-      credentials: 'omit',
-      redirect: 'manual'
-    };
-    
-    if (event.request.method !== 'GET' && event.request.method !== 'HEAD') {
-        try { requestArgs.body = await event.request.clone().blob(); } catch(e) {}
+  // Timeline
+  const timeline = document.getElementById('flow-timeline');
+  timeline.innerHTML = '<h3 style="font-family:Outfit;font-weight:700;margin:20px 0 12px;color:var(--text2)">📊 Timeline</h3>' +
+    entries.map(e => {
+      const type = e.type || (e.method ? 'api' : 'nav');
+      const url = e.url || e.path || '';
+      const status = e.status || e.statusCode || '';
+      const method = e.method || '';
+      return `
+        <div class="flow-entry ${type}">
+          <span class="flow-type ${type}">${method ? method + ' ' : ''}${type.toUpperCase()}</span>
+          <span class="flow-url">${escapeHtml(url)}</span>
+          ${status ? `<span class="flow-status">${status}</span>` : ''}
+        </div>`;
+    }).join('');
+}
+
+// ── Extract ──
+async function triggerExtract(btn) {
+  btn.classList.add('loading');
+  btn.innerHTML = '⏳ Extracting...';
+  try {
+    const res = await fetch(`/__archive__/api/extract/${SNAP_ID}`, {method:'POST'});
+    const data = await res.json();
+    if (res.ok) {
+      toast('✅ Extraction complete!', 'success');
+      location.reload();
+    } else {
+      toast('❌ ' + (data.error || 'Failed'), 'error');
+      btn.classList.remove('loading');
+      btn.innerHTML = '🔄 Extract Now';
     }
-    
-    return fetch(proxyUrl, requestArgs);
-  })());
-});
+  } catch(e) {
+    toast('❌ ' + e.message, 'error');
+    btn.classList.remove('loading');
+    btn.innerHTML = '🔄 Extract Now';
+  }
+}
+
+// ── Search ──
+function filterContent(q) {
+  const sections = document.querySelectorAll('.content-section');
+  if (!q.trim()) { sections.forEach(s => s.style.display = ''); return; }
+  const ql = q.toLowerCase();
+  sections.forEach(s => {
+    s.style.display = s.textContent.toLowerCase().includes(ql) ? '' : 'none';
+  });
+}
+
+// ── Downloads ──
+function downloadJSON() {
+  if (!extractedData) { toast('No data to download', 'error'); return; }
+  downloadBlob(JSON.stringify(extractedData, null, 2), `${SNAP_ID}_extracted.json`, 'application/json');
+}
+function downloadMD() {
+  if (!markdownContent) { toast('No markdown to download', 'error'); return; }
+  downloadBlob(markdownContent, `${SNAP_ID}_content.md`, 'text/markdown');
+}
+function copyMarkdown() {
+  if (!markdownContent) { toast('No markdown to copy', 'error'); return; }
+  navigator.clipboard.writeText(markdownContent).then(() => toast('📋 Copied to clipboard!', 'success'));
+}
+function downloadBlob(content, name, type) {
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(new Blob([content], {type}));
+  a.download = name; a.click(); URL.revokeObjectURL(a.href);
+}
+
+// ── Lightbox ──
+function openLightbox(src) {
+  document.getElementById('lightbox-img').src = src;
+  document.getElementById('lightbox').classList.add('open');
+  document.body.style.overflow = 'hidden';
+}
+function closeLightbox() {
+  document.getElementById('lightbox').classList.remove('open');
+  document.body.style.overflow = '';
+}
+document.addEventListener('keydown', e => { if (e.key === 'Escape') closeLightbox(); });
+
+// ── Utilities ──
+function escapeHtml(s) {
+  if (typeof s !== 'string') return '';
+  return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
+function formatSize(bytes) {
+  if (bytes < 1024) return bytes + ' B';
+  if (bytes < 1048576) return (bytes/1024).toFixed(1) + ' KB';
+  return (bytes/1048576).toFixed(1) + ' MB';
+}
+function getFileIcon(ext) {
+  const icons = {js:'📜',css:'🎨',html:'🌐',json:'📋',svg:'🎯',woff:'🔤',woff2:'🔤',ttf:'🔤',eot:'🔤',mp4:'🎬',webm:'🎬',mp3:'🎵',pdf:'📄',zip:'📦'};
+  return icons[ext] || '📄';
+}
+function toast(msg, type='info') {
+  const box = document.getElementById('toast-box');
+  const el = document.createElement('div');
+  el.className = 'toast-msg ' + type;
+  el.textContent = msg;
+  box.appendChild(el);
+  setTimeout(() => el.remove(), 4000);
+}
+</script>
+</body>
+</html>
 """
+
+def _load_sw_js() -> str:
+    """Load sw.js from the root directory."""
+    sw_path = Path(__file__).parent.parent / "sw.js"
+    if sw_path.exists():
+        return sw_path.read_text(encoding="utf-8")
+    return "\nself.addEventListener('install', () => self.skipWaiting());\nself.addEventListener('activate', () => self.clients.claim());\n"
+
+SW_JS = _load_sw_js()
 
 
 class WaybackServer:
@@ -574,6 +1330,8 @@ class WaybackServer:
       /__archive__/api/*    → JSON API cho dashboard
       /__wb/<encoded_url>   → Serve snapshot của URL đó
       /__mhtml/<snap_id>    → Serve MHTML snapshot for a recording
+      /__view/<snap_id>     → Structured replay UI for a snapshot
+      /__asset/<snap_id>/*  → Serve files from snapshot directory
 
     PERF improvements:
       - ThreadingMixIn: handles concurrent requests (no more blocking)
@@ -594,6 +1352,12 @@ class WaybackServer:
                 return self.client_address[0]
 
             def do_POST(self):
+                path = self.path
+                # ── Extract API (POST only) ────────────────────────
+                if path.startswith("/__archive__/api/extract/"):
+                    snap_id = path[len("/__archive__/api/extract/"):].split("?")[0]
+                    self._api_extract(snap_id)
+                    return
                 self._handle_with_body()
 
             def do_PUT(self):
@@ -664,6 +1428,20 @@ class WaybackServer:
 
                     self._serve_url(url)
 
+                # ── Structured View ────────────────────────────────
+                elif path.startswith("/__view/"):
+                    snap_id = path[8:].split("?")[0]
+                    self._view_snapshot(snap_id)
+
+                # ── Asset Serving ─────────────────────────────────────
+                elif path.startswith("/__asset/"):
+                    rest = path[9:]
+                    parts = rest.split("/", 1)
+                    if len(parts) == 2:
+                        self._serve_asset(parts[0], parts[1])
+                    else:
+                        self._404(path)
+
                 # ── Root → redirect to dashboard ──────────────────────
                 elif path in ("/", ""):
                     self.send_response(302)
@@ -709,28 +1487,198 @@ class WaybackServer:
                            extra_headers={"Cache-Control": "no-cache"})
 
             def _serve_sw(self):
-                body = SW_JS.encode("utf-8")
+                body = _load_sw_js().encode("utf-8")
                 self._send(200, "application/javascript; charset=utf-8", body,
                            extra_headers={"Service-Worker-Allowed": "/", "Cache-Control": "no-cache"})
 
 
+            def _find_snap(self, snap_id: str):
+                """Find a snapshot by ID and return (snap_dict, snap_path) or (None, None)."""
+                for snap in archive.data["snapshots"]:
+                    if snap["id"] == snap_id:
+                        return snap, archive.root / snap["path"]
+                return None, None
+
             def _api(self, sub: str):
                 if sub == "snapshots":
                     # PERF: Serve from in-memory index, no disk reads
-                    snaps = sorted(
+                    snaps_raw = sorted(
                         archive.data["snapshots"],
                         key=lambda x: x.get("recorded_at", ""),
                         reverse=True,
                     )
+                    # Augment each snapshot with has_extracted status
+                    snaps = []
+                    for s in snaps_raw:
+                        snap_copy = dict(s)
+                        snap_path = archive.root / s["path"]
+                        snap_copy["has_extracted"] = (snap_path / "extracted_data.json").exists()
+                        snaps.append(snap_copy)
                     body = json.dumps(snaps).encode()
                     self._send(200, "application/json", body,
                                extra_headers={"Cache-Control": "no-store"})
+
                 elif sub.startswith("search?"):
                     q = urllib.parse.parse_qs(sub[7:]).get("q", [""])[0]
                     body = json.dumps(archive.search(q)).encode()
                     self._send(200, "application/json", body)
+
+                # ── Extracted data API ─────────────────────────────────
+                elif sub.startswith("extracted/"):
+                    snap_id = sub[len("extracted/"):].split("?")[0]
+                    snap, snap_path = self._find_snap(snap_id)
+                    if not snap:
+                        self._send(404, "application/json", json.dumps({"error": "Snapshot not found"}).encode())
+                        return
+                    extracted_file = snap_path / "extracted_data.json"
+                    if not extracted_file.exists():
+                        self._send(404, "application/json", json.dumps({"error": "No extracted data"}).encode())
+                        return
+                    body = extracted_file.read_bytes()
+                    self._send(200, "application/json; charset=utf-8", body)
+
+                # ── Content markdown API ───────────────────────────────
+                elif sub.startswith("content/"):
+                    snap_id = sub[len("content/"):].split("?")[0]
+                    snap, snap_path = self._find_snap(snap_id)
+                    if not snap:
+                        self._send(404, "text/plain", b"Snapshot not found")
+                        return
+                    md_file = snap_path / "content.md"
+                    if not md_file.exists():
+                        self._send(404, "text/plain", b"No markdown content")
+                        return
+                    body = md_file.read_bytes()
+                    self._send(200, "text/markdown; charset=utf-8", body)
+
+                # ── Assets list API ────────────────────────────────────
+                elif sub.startswith("assets/"):
+                    snap_id = sub[len("assets/"):].split("?")[0]
+                    snap, snap_path = self._find_snap(snap_id)
+                    if not snap:
+                        self._send(404, "application/json", json.dumps({"error": "Snapshot not found"}).encode())
+                        return
+                    assets_dir = snap_path / "assets"
+                    assets = []
+                    if assets_dir.exists():
+                        for f in assets_dir.rglob("*"):
+                            if f.is_file():
+                                rel = f.relative_to(snap_path)
+                                ct, _ = mimetypes.guess_type(str(f))
+                                assets.append({
+                                    "name": f.name,
+                                    "path": str(rel).replace("\\", "/"),
+                                    "size": f.stat().st_size,
+                                    "type": ct or "application/octet-stream",
+                                })
+                    body = json.dumps(assets).encode()
+                    self._send(200, "application/json", body)
+
+                # ── Flow/navigation data API ──────────────────────────
+                elif sub.startswith("flow/"):
+                    snap_id = sub[len("flow/"):].split("?")[0]
+                    snap, snap_path = self._find_snap(snap_id)
+                    if not snap:
+                        self._send(404, "application/json", json.dumps({"error": "Snapshot not found"}).encode())
+                        return
+                    # Try flow.json first, fall back to building from manifest
+                    flow_data = {"navigations": [], "api_calls": []}
+                    flow_file = snap_path / "flow.json"
+                    if flow_file.exists():
+                        try:
+                            flow_data = json.loads(flow_file.read_text(encoding="utf-8"))
+                        except Exception:
+                            pass
+                    else:
+                        # Build flow from manifest and api_responses
+                        manifest_file = snap_path / "manifest.json"
+                        if manifest_file.exists():
+                            try:
+                                mf = json.loads(manifest_file.read_text(encoding="utf-8"))
+                                # Add navigation entry
+                                flow_data["navigations"].append({
+                                    "type": "nav",
+                                    "url": snap.get("url", ""),
+                                    "status": 200,
+                                })
+                                # Add API calls from manifest
+                                for api in mf.get("api_responses", []):
+                                    flow_data["navigations"].append({
+                                        "type": "api",
+                                        "url": api.get("url", ""),
+                                        "method": api.get("method", "GET"),
+                                        "status": api.get("response", {}).get("status", 200),
+                                    })
+                            except Exception:
+                                pass
+                    body = json.dumps(flow_data).encode()
+                    self._send(200, "application/json", body)
+
+                # ── Extract trigger (also handled via do_POST) ────────
+                elif sub.startswith("extract/"):
+                    snap_id = sub[len("extract/"):].split("?")[0]
+                    self._api_extract(snap_id)
+
                 else:
                     self._404(sub)
+
+            def _api_extract(self, snap_id: str):
+                """Trigger content extraction for a snapshot."""
+                snap, snap_path = self._find_snap(snap_id)
+                if not snap:
+                    self._send(404, "application/json",
+                               json.dumps({"error": "Snapshot not found"}).encode())
+                    return
+                try:
+                    from src.extractor import ContentExtractor
+                    extractor = ContentExtractor(snap_path)
+                    data = extractor.extract()
+                    self._send(200, "application/json",
+                               json.dumps({"status": "ok", "snap_id": snap_id, "sections": len(data.get("sections", []))}).encode())
+                except Exception as e:
+                    log("ERR", f"Extraction failed for {snap_id}: {e}")
+                    self._send(500, "application/json",
+                               json.dumps({"error": str(e)}).encode())
+
+            def _view_snapshot(self, snap_id: str):
+                """Serve the structured view UI for a snapshot."""
+                snap, snap_path = self._find_snap(snap_id)
+                if not snap:
+                    self._archive_not_found(f"Snapshot {snap_id}")
+                    return
+                html = VIEW_HTML.replace("{{SNAP_ID}}", snap_id)
+                body = html.encode("utf-8")
+                self._send(200, "text/html; charset=utf-8", body,
+                           extra_headers={"Cache-Control": "no-cache"})
+
+            def _serve_asset(self, snap_id: str, asset_path: str):
+                """Serve a file from a snapshot's directory."""
+                snap, snap_path = self._find_snap(snap_id)
+                if not snap:
+                    self._404(f"/__asset/{snap_id}/{asset_path}")
+                    return
+                # Decode percent-encoded path
+                asset_path = urllib.parse.unquote(asset_path)
+                filepath = snap_path / asset_path
+                # Security: prevent directory traversal
+                try:
+                    filepath = filepath.resolve()
+                    snap_resolved = snap_path.resolve()
+                    if not str(filepath).startswith(str(snap_resolved)):
+                        self._404(f"/__asset/{snap_id}/{asset_path}")
+                        return
+                except Exception:
+                    self._404(f"/__asset/{snap_id}/{asset_path}")
+                    return
+                if not filepath.exists() or not filepath.is_file():
+                    self._404(f"/__asset/{snap_id}/{asset_path}")
+                    return
+                ct, _ = mimetypes.guess_type(str(filepath))
+                ct = ct or "application/octet-stream"
+                body = filepath.read_bytes()
+                self._send(200, ct, body, extra_headers={
+                    "Cache-Control": "public, max-age=3600",
+                })
 
             def _serve_mhtml(self, snap_id: str):
                 """Serve the MHTML snapshot as a downloadable/viewable file."""
@@ -1071,6 +2019,10 @@ class WaybackServer:
                         text = re.sub(r'(?<!window\.)\blocation\.pathname\b', '(window.__wr_path?window.__wr_path():location.pathname)', text)
                         text = re.sub(r'\bwindow\.location\.href\b', 'window.__wr_href()', text)
                         text = re.sub(r'(?<!window\.)\blocation\.href\b', '(window.__wr_href?window.__wr_href():location.href)', text)
+                        
+                        # FIX: Force lazy images in JS (like Reddit avatars) to scale properly and load eagerly
+                        text = re.sub(r'(<img\b[^>]*?)loading=["\']?lazy["\']?', r'\1loading="eager" style="width:100%;height:100%;object-fit:cover;"', text, flags=re.IGNORECASE)
+                        text = re.sub(r'(<faceplate-img\b[^>]*?)loading=["\']?lazy["\']?', r'\1loading="eager"', text, flags=re.IGNORECASE)
                         
                         content = text.encode("utf-8")
                     except Exception:

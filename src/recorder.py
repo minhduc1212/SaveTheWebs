@@ -480,5 +480,8 @@ class WebRecorder:
         print(f"  🔌 API calls : {len(m['api_calls'])}")
         print(f"  🔑 Tokens    : {', '.join(m['tokens'].keys()) or 'none'}")
         print(f"{'═'*62}")
-        print(f"\n  ▶  Replay : {C['C']}python webrecorder.py --replay{C['X']}")
-        print(f"  🔍 Search : http://localhost:8080/__archive__\n")
+        print(f"\n  ▶  Replay   : {C['C']}python webrecorder.py --replay{C['X']}")
+        print(f"  📊 Extract  : {C['C']}python webrecorder.py --extract {self.store.meta['id']}{C['X']}")
+        print(f"  📦 All      : {C['C']}python webrecorder.py --extract-all{C['X']}")
+        print(f"  🔍 Browse   : http://localhost:8080/__archive__\n")
+

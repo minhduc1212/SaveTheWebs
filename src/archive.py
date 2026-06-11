@@ -193,6 +193,36 @@ class ArchiveIndex:
         self.invalidate_cache()
         self.save()
 
+    def get_snapshot_by_id(self, snap_id: str) -> dict | None:
+        """Return the snapshot entry dict for a given snap_id, or None."""
+        self.check_reload()
+        for s in self.data["snapshots"]:
+            if s["id"] == snap_id:
+                return s
+        return None
+
+    def get_snapshot_path(self, snap_id: str) -> Path | None:
+        """Return the absolute Path to a snapshot directory, or None."""
+        snap = self.get_snapshot_by_id(snap_id)
+        if snap:
+            return self.root / snap["path"]
+        return None
+
+    def is_extracted(self, snap_id: str) -> bool:
+        """Check if a snapshot has been extracted (extracted_data.json exists)."""
+        snap_path = self.get_snapshot_path(snap_id)
+        if snap_path:
+            return (snap_path / "extracted_data.json").exists()
+        return False
+
+    def mark_extracted(self, snap_id: str):
+        """Mark a snapshot as extracted in the index."""
+        for s in self.data["snapshots"]:
+            if s["id"] == snap_id:
+                s["extracted"] = True
+                break
+        self.save()
+
 
 class SnapshotStore:
     def __init__(self, snap_path: Path, meta: dict, index: ArchiveIndex):

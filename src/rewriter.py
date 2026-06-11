@@ -133,6 +133,9 @@ def rewrite_html(html: str, all_routes: dict, base_url: str = "", tokens_script:
     var originalHost = Object.getOwnPropertyDescriptor(Location.prototype, 'host');
     var originalHostname = Object.getOwnPropertyDescriptor(Location.prototype, 'hostname');
     
+    var realOrigin = originalOrigin ? originalOrigin.get.call(window.location) : window.location.origin;
+    var realHref = originalHref ? originalHref.get.call(window.location) : window.location.href;
+
     window.__wr_path = function() {
       try {
         var p = originalPathname ? originalPathname.get.call(window.location) : window.location.pathname;
@@ -198,6 +201,61 @@ def rewrite_html(html: str, all_routes: dict, base_url: str = "", tokens_script:
     safeDefine(Location.prototype, 'replace', { value: function(url) { console.warn('Blocked location.replace: ' + url); }, configurable: true });
     safeDefine(Location.prototype, 'assign', { value: function(url) { console.warn('Blocked location.assign: ' + url); }, configurable: true });
 
+    // Intercept window.open
+    var originalWindowOpen = window.open;
+    window.open = function(url, target, features) {
+      if (url && typeof url === 'string') {
+        try {
+          var absUrl = new URL(url, realHref).href;
+          if (absUrl.startsWith('http') && absUrl.indexOf(realOrigin) !== 0) {
+            url = realOrigin + '/__wb/' + encodeURIComponent(absUrl);
+          }
+        } catch(e) {}
+      }
+      return originalWindowOpen.call(window, url, target, features);
+    };
+
+    // Intercept all <a> tag clicks (even inside Shadow DOMs)
+    document.addEventListener('click', function(e) {
+      var anchor = null;
+      if (e.composedPath) {
+        var path = e.composedPath();
+        for (var i = 0; i < path.length; i++) {
+          if (path[i].tagName === 'A') { anchor = path[i]; break; }
+        }
+      }
+      if (!anchor && e.target.closest) { anchor = e.target.closest('a'); }
+      if (!anchor || !anchor.href) return;
+      
+      var hrefAttr = anchor.getAttribute('href');
+      if (hrefAttr && (hrefAttr.startsWith('javascript:') || hrefAttr.startsWith('#'))) return;
+      
+      var absoluteUrl = anchor.href;
+      if (absoluteUrl.startsWith('http') && absoluteUrl.indexOf(realOrigin) !== 0) {
+        e.preventDefault();
+        e.stopPropagation();
+        var proxyUrl = realOrigin + '/__wb/' + encodeURIComponent(absoluteUrl);
+        if (anchor.target === '_blank') {
+          originalWindowOpen.call(window, proxyUrl, '_blank');
+        } else if (originalHref && originalHref.set) {
+          originalHref.set.call(window.location, proxyUrl);
+        } else {
+          window.location.assign(proxyUrl);
+        }
+      }
+    }, true);
+
+    // Intercept forms submitting to external domains
+    document.addEventListener('submit', function(e) {
+      if (e.target && e.target.action) {
+        if (e.target.action.startsWith('http') && e.target.action.indexOf(realOrigin) !== 0) {
+          e.preventDefault();
+          e.stopPropagation();
+          console.warn('[WR] Blocked external form submit:', e.target.action);
+        }
+      }
+    }, true);
+
     try {
       var originalGo = history.go;
       history.go = function(delta) {
@@ -209,20 +267,6 @@ def rewrite_html(html: str, all_routes: dict, base_url: str = "", tokens_script:
       };
     } catch(e) {}
 
-    try {
-      if ('serviceWorker' in navigator) {
-        // Register Service Worker for intercepting fetch requests during replay
-        navigator.serviceWorker.register('/sw.js', { scope: '/' })
-          .then(function(reg) {
-             console.log('ServiceWorker registered with scope:', reg.scope);
-          }).catch(function(err) {
-             console.log('ServiceWorker registration failed:', err);
-          });
-        // Block original page script from modifying or knowing about our service worker
-        safeDefine(navigator, 'serviceWorker', { get: function() { return undefined; }, configurable: true });
-      }
-    } catch(e) {}
-    
     // Fallback: block navigation
     window.addEventListener('beforeunload', function (e) {
       console.warn('Navigation blocked by WebRecorder fallback');
@@ -263,12 +307,57 @@ def rewrite_html(html: str, all_routes: dict, base_url: str = "", tokens_script:
 })();
 </script>"""
 
+    def _build_route_injection_script(all_routes: dict) -> str:
+        import json
+        url_keys = [u for u, v in all_routes.items() if not str(v).startswith("redirect:")]
+        routes_json = json.dumps(url_keys)
+        return f"""<script>
+(function() {{
+  try {{
+    var _wrRouteList = {routes_json};
+    var _wrRoutesObj = {{}};
+    for (var i = 0; i < _wrRouteList.length; i++) {{
+      _wrRoutesObj[_wrRouteList[i]] = 1;
+    }}
+    function _sendRoutesToSW(reg) {{
+      var target = reg.active || reg.installing || reg.waiting;
+      if (!target) return;
+      target.postMessage({{ type: 'INIT_ROUTES', routes: _wrRoutesObj }});
+    }}
+    if ('serviceWorker' in navigator) {{
+      navigator.serviceWorker.register('/sw.js', {{ scope: '/' }})
+        .then(function(reg) {{
+          _sendRoutesToSW(reg);
+          reg.addEventListener('updatefound', function() {{
+            var newSW = reg.installing;
+            if (newSW) {{
+              newSW.addEventListener('statechange', function() {{
+                if (newSW.state === 'activated') _sendRoutesToSW(reg);
+              }});
+            }}
+          }});
+        }})
+        .catch(function(err) {{
+          console.warn('[WR] SW registration failed:', err);
+        }});
+      navigator.serviceWorker.ready.then(function(reg) {{
+        _sendRoutesToSW(reg);
+      }}).catch(function() {{}});
+    }}
+  }} catch(e) {{
+    console.warn('[WR] Route injection failed:', e);
+  }}
+}})();
+</script>"""
+
+    route_injection_script = _build_route_injection_script(all_routes)
+
     if "<head>" in html:
-        html = html.replace("<head>", f"<head>{tokens_script}{spa_script}", 1)
+        html = html.replace("<head>", f"<head>{tokens_script}{spa_script}{route_injection_script}", 1)
     elif "<HEAD>" in html:
-        html = html.replace("<HEAD>", f"<HEAD>{tokens_script}{spa_script}", 1)
+        html = html.replace("<HEAD>", f"<HEAD>{tokens_script}{spa_script}{route_injection_script}", 1)
     else:
-        html = f"{tokens_script}{spa_script}{html}"
+        html = f"{tokens_script}{spa_script}{route_injection_script}{html}"
 
     def resolve(url: str) -> str:
         """Resolve a possibly-relative URL against base_url."""
@@ -425,14 +514,17 @@ def rewrite_html(html: str, all_routes: dict, base_url: str = "", tokens_script:
                 # No src attribute — add one
                 img_tag = img_tag.replace("<img ", f'<img src="{rewritten_lazy}" ', 1)
 
-            # Remove loading="lazy" since we want immediate rendering offline
-            img_tag = re.sub(r'\s*loading=["\']lazy["\']', '', img_tag, flags=re.IGNORECASE)
+        # Remove loading="lazy" from ALL images to ensure offline rendering
+        img_tag = re.sub(r'\s*loading=["\']?lazy["\']?', '', img_tag, flags=re.IGNORECASE)
 
         return img_tag
 
     html = re.sub(r'<img\s+[^>]*/?>', fix_lazy_images, html, flags=re.IGNORECASE)
 
-    # 6. Normalize charset meta tags to UTF-8 to prevent browsers from rendering garbled text
+    # 6. FIX: Force eager loading for faceplate-img in HTML to bypass IntersectionObserver
+    html = re.sub(r'(<faceplate-img\b[^>]*?)loading=["\']?lazy["\']?', r'\1loading="eager"', html, flags=re.IGNORECASE)
+
+    # 7. Normalize charset meta tags to UTF-8 to prevent browsers from rendering garbled text
     html = re.sub(
         r'<meta\s+charset=["\']?(?:gbk|gb2312|gb18030|big5|iso-8859-1|windows-1252)["\']?\s*/?>',
         '<meta charset="utf-8">',

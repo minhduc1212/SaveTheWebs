@@ -5,11 +5,49 @@ from pathlib import Path
 from src.archive import ArchiveIndex
 from src.server import WaybackServer
 from src.recorder import WebRecorder
-from src.utils import DEFAULT_ARCHIVE
+from src.utils import DEFAULT_ARCHIVE, C, log
+
+
+def _run_extraction(archive_dir: str, snap_id: str = None):
+    """Run content extraction on one or all snapshots."""
+    from src.extractor import ContentExtractor
+    from src.md_generator import MarkdownGenerator
+
+    idx = ArchiveIndex(archive_dir)
+
+    if snap_id:
+        snap_path = idx.get_snapshot_path(snap_id)
+        if not snap_path:
+            print(f"  {C['R']}Snapshot not found: {snap_id}{C['X']}")
+            return
+        targets = [(snap_id, snap_path)]
+    else:
+        targets = []
+        for s in idx.data["snapshots"]:
+            sp = idx.root / s["path"]
+            targets.append((s["id"], sp))
+
+    for sid, sp in targets:
+        try:
+            log("INFO", f"Extracting: {sid}")
+            extractor = ContentExtractor(sp)
+            data = extractor.extract()
+
+            md_gen = MarkdownGenerator(sp / "extracted_data.json", data=data)
+            md_gen.generate()
+
+            idx.mark_extracted(sid)
+            log("OK", f"Extracted: {sid} → extracted_data.json + content.md")
+        except Exception as e:
+            log("WARN", f"Failed to extract {sid}: {e}")
+
+    print(f"\n  {C['G']}{C['BD']}Extraction complete!{C['X']}")
+    print(f"  Processed {len(targets)} snapshot(s)\n")
+
 
 def main():
     ap = argparse.ArgumentParser(
-        description="WebRecorder v2 – Wayback Machine style archiver",
+        description="WebRecorder v3 – Wayback Machine style archiver with content extraction",
         formatter_class=argparse.RawTextHelpFormatter,
         epilog="""
 Examples:
@@ -33,6 +71,12 @@ Examples:
   # Liệt kê snapshots
   python webrecorder.py --list
   python webrecorder.py --list -a my_archive
+
+  # Extract content from all snapshots → JSON + Markdown
+  python webrecorder.py --extract-all
+
+  # Extract a specific snapshot
+  python webrecorder.py --extract books.toscrape.com_20260605_194745
         """
     )
     ap.add_argument("url", nargs="?", help="URL cần ghi lại")
@@ -47,6 +91,12 @@ Examples:
                     help="Giây chờ giữa mỗi bước cuộn (auto-scroll, default: 0.5)")
     ap.add_argument("--max-scrolls", type=int, default=100,
                     help="Số lần cuộn tối đa (default: 100)")
+    ap.add_argument("--extract", metavar="SNAP_ID",
+                    help="Extract content from a specific snapshot → JSON + Markdown")
+    ap.add_argument("--extract-all", action="store_true",
+                    help="Extract content from ALL snapshots → JSON + Markdown")
+    ap.add_argument("--no-extract", action="store_true",
+                    help="Skip auto-extraction after recording")
     args = ap.parse_args()
 
     if args.list:
@@ -59,16 +109,35 @@ Examples:
         print(f"  Kho: {Path(args.archive).resolve()}  ({len(snaps)} snapshots)")
         print(f"{'═'*70}")
         for s in sorted(snaps, key=lambda x: x["recorded_at"], reverse=True):
-            print(f"  📸 {s['id']}")
+            extracted = "✅" if idx.is_extracted(s["id"]) else "❌"
+            print(f"  📸 {s['id']}  [Extracted: {extracted}]")
             print(f"     URL    : {s['url']}")
             print(f"     Assets : {s.get('asset_count', 0)}  |  API: {s.get('api_count', 0)}")
             print(f"     Time   : {s['recorded_at']}")
             print()
+
+    elif args.extract:
+        _run_extraction(args.archive, args.extract)
+
+    elif args.extract_all:
+        _run_extraction(args.archive)
+
     elif args.replay:
         WaybackServer(args.archive, args.port).start()
+
     elif args.url:
         rec = WebRecorder(args.url, args.archive, args.headless, args.timeout,
                           scroll_pause=args.scroll_pause, max_scrolls=args.max_scrolls)
         asyncio.run(rec.record())
+
+        # Auto-extract after recording unless --no-extract is set
+        if not args.no_extract:
+            print(f"\n  {C['C']}Auto-extracting content...{C['X']}")
+            idx = ArchiveIndex(args.archive)
+            # Find the most recent snapshot (the one we just recorded)
+            latest = sorted(idx.data["snapshots"],
+                          key=lambda x: x["recorded_at"], reverse=True)
+            if latest:
+                _run_extraction(args.archive, latest[0]["id"])
     else:
         ap.print_help()
