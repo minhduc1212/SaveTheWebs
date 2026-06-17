@@ -64,40 +64,62 @@ class MarkdownGenerator:
 
     def generate(self, output_path: str | Path | None = None) -> str:
         """
-        Generate the Markdown string and optionally write it to disk.
+        Generate content.md and structure.md and optionally write them to disk.
 
         Args:
             output_path: Where to write the .md file.  Defaults to
                          ``content.md`` in the same directory as the JSON.
 
         Returns:
-            The full Markdown string.
+            The full content Markdown string.
         """
-        parts: list[str] = [
+        # 1. Build content.md content
+        content_parts: list[str] = [
             self._build_frontmatter(),
             self._build_banner(),
-            self._build_toc(),
             self._build_content_sections(),
+        ]
+        content_md = "\n".join(p for p in content_parts if p)
+
+        # 2. Build structure.md content
+        structure_parts: list[str] = [
+            self._build_structure_frontmatter(),
+            self._build_toc(),
             self._build_navigation_section(),
             self._build_flow_section(),
             self._build_asset_summary(),
         ]
+        structure_md = "\n".join(p for p in structure_parts if p)
 
-        md = "\n".join(p for p in parts if p)
-
-        # Determine output path
+        # Determine output paths
         if output_path is None and self.snap_dir:
             output_path = self.snap_dir / "content.md"
 
         if output_path:
             out = Path(output_path)
-            try:
-                out.write_text(md, encoding="utf-8")
-                log("OK", f"Markdown generated → {out.name}  ({out.parent.name})")
-            except OSError as exc:
-                log("ERR", f"Failed to write {out}: {exc}")
+            if out.name == "content.md":
+                content_path = out
+                structure_path = out.parent / "structure.md"
+            elif out.name == "structure.md":
+                content_path = out.parent / "content.md"
+                structure_path = out
+            else:
+                content_path = out
+                structure_path = out.parent / "structure.md"
 
-        return md
+            try:
+                content_path.write_text(content_md, encoding="utf-8")
+                log("OK", f"Content Markdown generated → {content_path.name}  ({content_path.parent.name})")
+            except OSError as exc:
+                log("ERR", f"Failed to write {content_path}: {exc}")
+
+            try:
+                structure_path.write_text(structure_md, encoding="utf-8")
+                log("OK", f"Structure Markdown generated → {structure_path.name}  ({structure_path.parent.name})")
+            except OSError as exc:
+                log("ERR", f"Failed to write {structure_path}: {exc}")
+
+        return content_md
 
     @staticmethod
     def generate_all(archive_dir: str | Path = "web_archive") -> int:
@@ -165,6 +187,19 @@ class MarkdownGenerator:
         lines.append("---")
         return "\n".join(lines) + "\n"
 
+    def _build_structure_frontmatter(self) -> str:
+        """Build YAML frontmatter block for structure.md."""
+        meta = self.data.get("meta", {})
+        lines = [
+            "---",
+            f"title: \"Structure of {_yaml_escape(meta.get('title', ''))}\"",
+            f"url: \"{_yaml_escape(self.data.get('source_url', ''))}\"",
+            f"snapshot_id: \"{_yaml_escape(self.data.get('snapshot_id', ''))}\"",
+            f"recorded_at: \"{_yaml_escape(self.data.get('recorded_at', ''))}\"",
+            "---",
+        ]
+        return "\n".join(lines) + "\n"
+
     # ── Banner / Hero ─────────────────────────────────────────────────────
 
     def _build_banner(self) -> str:
@@ -214,15 +249,328 @@ class MarkdownGenerator:
 
     # ── Content Sections ──────────────────────────────────────────────────
 
+    def _convert_html_to_markdown(self) -> str:
+        """Convert final_page.html directly to clean, simple Markdown matching original structure."""
+        if not self.snap_dir:
+            return ""
+        
+        html_path = self.snap_dir / "final_page.html"
+        if not html_path.exists():
+            return ""
+            
+        try:
+            from bs4 import BeautifulSoup, Tag, NavigableString, Comment
+            # Load HTML
+            html = ""
+            for encoding in ("utf-8", "utf-8-sig", "gb18030", "gbk", "latin-1"):
+                try:
+                    html = html_path.read_text(encoding=encoding)
+                    break
+                except (UnicodeDecodeError, UnicodeError):
+                    continue
+            else:
+                html = html_path.read_bytes().decode("utf-8", errors="replace")
+                
+            soup = BeautifulSoup(html, "html.parser")
+            body = soup.find("body") or soup
+            
+            # Setup URL Resolver
+            from src.extractor import URLResolver
+            manifest_path = self.snap_dir / "manifest.json"
+            routes = {}
+            if manifest_path.exists():
+                try:
+                    routes = json.loads(manifest_path.read_text(encoding="utf-8")).get("routes", {})
+                except Exception:
+                    pass
+            base_url = self.data.get("source_url", "")
+            url_resolver = URLResolver(base_url, routes)
+            
+            # Helper for getting image source
+            def get_img_src(el) -> str:
+                for attr in ("src", "data-src", "data-original", "data-lazy-src"):
+                    val = el.get(attr)
+                    if isinstance(val, list):
+                        val = " ".join(val)
+                    if val and not val.startswith("data:"):
+                        return val.strip()
+                val = el.get("src", "")
+                if isinstance(val, list):
+                    val = " ".join(val)
+                return val.strip() if val else ""
+
+            # Tags that never contain content
+            skip_tags = {"script", "style", "noscript", "iframe", "svg", "canvas",
+                         "link", "meta", "template", "input", "select",
+                         "textarea", "button", "form", "label", "head"}
+            
+            # Keywords indicating non-content regions like ads
+            skip_kws = {"ad-", "ads-", "advert", "popup", "modal",
+                        "cookie", "analytics", "tracking", "overlay"}
+
+            def should_skip(el) -> bool:
+                if el.name.lower() in skip_tags:
+                    return True
+                classes = el.get("class", [])
+                if isinstance(classes, str):
+                    classes = [classes]
+                classes_str = " ".join(classes).lower()
+                eid = str(el.get("id", "")).lower()
+                for kw in skip_kws:
+                    if kw in classes_str or kw in eid:
+                        if el.name.lower() not in {"main", "article", "section"}:
+                            return True
+                return False
+
+            block_tags = {"p", "div", "section", "article", "header", "footer", "nav", "aside",
+                          "ul", "ol", "li", "tr", "table", "h1", "h2", "h3", "h4", "h5", "h6",
+                          "pre", "blockquote", "fieldset", "form"}
+
+            def smart_join(parts: list[str]) -> str:
+                if not parts:
+                    return ""
+                result = []
+                for part in parts:
+                    if not part:
+                        continue
+                    if not result:
+                        result.append(part)
+                        continue
+                    
+                    last_part = result[-1]
+                    last_char = ""
+                    for char in reversed(last_part):
+                        if not char.isspace():
+                            last_char = char
+                            break
+                    
+                    first_char = ""
+                    for char in part:
+                        if not char.isspace():
+                            first_char = char
+                            break
+                            
+                    if last_char.isalnum() and first_char.isalnum():
+                        if not last_part[-1].isspace() and not part[0].isspace():
+                            result.append(" " + part)
+                        else:
+                            result.append(part)
+                    else:
+                        result.append(part)
+                return "".join(result)
+
+            def convert(node, indent="", in_list=False) -> str:
+                if isinstance(node, Comment):
+                    return ""
+                if isinstance(node, NavigableString):
+                    text = str(node)
+                    cleaned = re.sub(r"[\r\n\t]+", " ", text)
+                    cleaned = re.sub(r" +", " ", cleaned)
+                    return cleaned
+                
+                if not isinstance(node, Tag):
+                    return ""
+                    
+                if should_skip(node):
+                    return ""
+                    
+                tag_name = node.name.lower()
+                
+                # Check if this element represents a section header
+                is_section_header = False
+                if tag_name == "header":
+                    classes = node.get("class", [])
+                    if isinstance(classes, str):
+                        classes = [classes]
+                    classes_str = " ".join(classes).lower()
+                    if not any(kw in classes_str for kw in {"title", "navbar", "menu"}):
+                        is_section_header = True
+                
+                if not is_section_header:
+                    classes = node.get("class", [])
+                    if isinstance(classes, str):
+                        classes = [classes]
+                    classes_str = " ".join(classes).lower()
+                    eid = str(node.get("id", "")).lower()
+                    if any(kw in classes_str or kw in eid for kw in {"section-title", "sect-title", "sect-header", "index-title"}):
+                        is_section_header = True
+
+                if is_section_header:
+                    inner = smart_join([convert(c, indent) for c in node.children]).strip()
+                    if not inner:
+                        return ""
+                    inner_cleaned = re.sub(r"^#+\s*", "", inner)
+                    return f"\n\n{indent}## {inner_cleaned}\n\n"
+
+                # Headings
+                if tag_name in {"h1", "h2", "h3", "h4", "h5", "h6"}:
+                    level = int(tag_name[1])
+                    inner = smart_join([convert(c, indent) for c in node.children]).strip()
+                    if not inner:
+                        return ""
+                    inner = re.sub(r"#+\s+", "", inner)
+                    return f"\n\n{indent}" + ("#" * level) + f" {inner}\n\n"
+                    
+                # Paragraphs
+                if tag_name == "p":
+                    inner = smart_join([convert(c, indent) for c in node.children]).strip()
+                    if not inner:
+                        return ""
+                    return f"\n\n{indent}{inner}\n\n"
+                    
+                # Line break
+                if tag_name == "br":
+                    return f"\n{indent}"
+                    
+                # Horizontal rule
+                if tag_name == "hr":
+                    return f"\n\n{indent}---\n\n"
+                    
+                # Strong
+                if tag_name in {"strong", "b"}:
+                    inner = smart_join([convert(c, indent) for c in node.children]).strip()
+                    if not inner:
+                        return ""
+                    return f"**{inner}**"
+                    
+                # Italics
+                if tag_name in {"em", "i"}:
+                    inner = smart_join([convert(c, indent) for c in node.children]).strip()
+                    if not inner:
+                        return ""
+                    return f"*{inner}*"
+                    
+                # Inline code
+                if tag_name == "code":
+                    inner = node.get_text().strip()
+                    if not inner:
+                        return ""
+                    return f"`{inner}`"
+                    
+                # Code block
+                if tag_name == "pre":
+                    code_el = node.find("code")
+                    code_text = code_el.get_text() if code_el else node.get_text()
+                    lang = ""
+                    if code_el:
+                        classes = code_el.get("class", [])
+                        if isinstance(classes, str):
+                            classes = classes.split()
+                        for c in classes:
+                            if c.startswith("language-"):
+                                lang = c[9:]
+                                break
+                    return f"\n\n{indent}```{lang}\n{code_text.strip()}\n{indent}```\n\n"
+                    
+                # Blockquote
+                if tag_name == "blockquote":
+                    inner = smart_join([convert(c, indent + "> ") for c in node.children]).strip()
+                    if not inner:
+                        return ""
+                    lines = [f"> {line}" for line in inner.split("\n")]
+                    return f"\n\n{indent}" + "\n".join(lines) + "\n\n"
+                    
+                # Links
+                if tag_name == "a":
+                    href = node.get("href", "").strip()
+                    inner = smart_join([convert(c, indent) for c in node.children]).strip()
+                    if not inner and not href:
+                        return ""
+                    if not href or href.startswith(("javascript:", "mailto:", "tel:", "#")):
+                        return inner
+                    resolved = url_resolver.resolve(href)
+                    title_attr = node.get("title", "").strip()
+                    title_suffix = f' "{_yaml_escape(title_attr)}"' if title_attr else ""
+                    return f"[{inner}]({resolved}{title_suffix})"
+                    
+                # Images
+                if tag_name == "img":
+                    src = get_img_src(node)
+                    if not src:
+                        return ""
+                    resolved = url_resolver.resolve(src)
+                    local_path = url_resolver.map_to_local(resolved) or resolved
+                    alt = node.get("alt", "").strip() or "Image"
+                    return f"![{alt}]({local_path})"
+                    
+                # Lists
+                if tag_name in {"ul", "ol"}:
+                    is_ordered = (tag_name == "ol")
+                    lines = []
+                    idx = 1
+                    for child in node.children:
+                        if isinstance(child, Tag) and child.name.lower() == "li":
+                            li_inner = smart_join([convert(c, indent + "  ", in_list=True) for c in child.children]).strip()
+                            if li_inner:
+                                prefix = f"{idx}. " if is_ordered else "- "
+                                indented_text = li_inner.replace("\n", "\n  ")
+                                lines.append(f"{indent}{prefix}{indented_text}")
+                                idx += 1
+                    if not lines:
+                        return ""
+                    return "\n\n" + "\n".join(lines) + "\n\n"
+                    
+                # Tables
+                if tag_name == "table":
+                    headers = []
+                    rows = []
+                    thead = node.find("thead")
+                    if thead:
+                        for th in thead.find_all(["th", "td"]):
+                            headers.append(smart_join([convert(c) for c in th.children]).strip())
+                    else:
+                        first_row = node.find("tr")
+                        if first_row:
+                            ths = first_row.find_all("th")
+                            if ths:
+                                headers = [smart_join([convert(c) for c in th.children]).strip() for th in ths]
+                    
+                    tbody = node.find("tbody") or node
+                    for tr in tbody.find_all("tr"):
+                        cells = [smart_join([convert(c) for c in td.children]).strip() for td in tr.find_all(["td", "th"])]
+                        if cells == headers and not node.find("thead"):
+                            continue
+                        if any(cells):
+                            rows.append(cells)
+                    
+                    table_md = _render_md_table(headers, rows)
+                    if not table_md:
+                        return ""
+                    return f"\n\n{indent}{table_md.replace(chr(10), chr(10) + indent)}\n\n"
+                    
+                # Spans / Generic
+                is_block = tag_name in block_tags
+                inner = smart_join([convert(c, indent) for c in node.children])
+                if is_block:
+                    return f"\n{inner}\n"
+                return inner
+
+            # Run the conversion starting from body
+            raw_md = convert(body)
+            
+            # Post-processing cleanups
+            cleaned_md = raw_md.replace("\r\n", "\n")
+            cleaned_md = re.sub(r"\n[ \t]*\n[ \t]*\n+", "\n\n", cleaned_md)
+            return cleaned_md.strip() + "\n"
+            
+        except Exception as exc:
+            log("WARN", f"Direct HTML to Markdown conversion failed: {exc}")
+            return ""
+
     def _build_content_sections(self) -> str:
-        """Build Markdown for all extracted content sections."""
+        """Build Markdown for all content sections, directly converting the DOM if possible."""
+        html_md = self._convert_html_to_markdown()
+        if html_md.strip():
+            return html_md
+
+        # Fallback to section-based extraction if final_page.html is not found
         content = self.data.get("content", {})
         sections = content.get("sections", [])
 
         if not sections:
             return ""
 
-        parts: list[str] = ["## Content\n"]
+        parts: list[str] = []
 
         for section in sections:
             section_md = self._render_section(section)

@@ -37,7 +37,7 @@ def _run_extraction(archive_dir: str, snap_id: str = None):
             md_gen.generate()
 
             idx.mark_extracted(sid)
-            log("OK", f"Extracted: {sid} → extracted_data.json + content.md")
+            log("OK", f"Extracted: {sid} → extracted_data.json + content.md + structure.md")
         except Exception as e:
             log("WARN", f"Failed to extract {sid}: {e}")
 

@@ -942,6 +942,7 @@ details.dom-details:not([open]) > summary .dom-ellipsis {
     <div class="tab" data-tab="flow">🔀 Flow</div>
     <div class="tab" data-tab="raw">🌐 Raw HTML</div>
     <div class="tab" data-tab="markdown">📝 Markdown</div>
+    <div class="tab" data-tab="structure">🏗️ Structure MD</div>
   </div>
 </div>
 
@@ -1004,6 +1005,15 @@ details.dom-details:not([open]) > summary .dom-ellipsis {
       </div>
       <div class="md-content" id="md-rendered"></div>
     </div>
+
+    <!-- Structure Tab -->
+    <div class="tab-panel" id="panel-structure">
+      <div class="md-toolbar">
+        <button class="h-btn" onclick="copyStructureMarkdown()">📋 Copy Structure</button>
+        <button class="h-btn" onclick="downloadStructureMD()">📥 Download structure.md</button>
+      </div>
+      <div class="md-content" id="structure-rendered"></div>
+    </div>
   </div>
 </div>
 
@@ -1020,6 +1030,7 @@ details.dom-details:not([open]) > summary .dom-ellipsis {
 const SNAP_ID = '{{SNAP_ID}}';
 let extractedData = null;
 let markdownContent = '';
+let structureMarkdownContent = '';
 let snapInfo = null;
 
 // ── Init ──
@@ -1035,7 +1046,7 @@ document.addEventListener('DOMContentLoaded', async () => {
       document.getElementById('panel-' + tab.dataset.tab).classList.add('active');
       // Show/hide sidebar based on tab
       const sb = document.getElementById('sidebar');
-      sb.style.display = ['content','markdown'].includes(tab.dataset.tab) ? '' : 'none';
+      sb.style.display = ['content','markdown','structure'].includes(tab.dataset.tab) ? '' : 'none';
       // Load raw iframe on demand
       if (tab.dataset.tab === 'raw' && snapInfo) {
         const iframe = document.getElementById('raw-iframe');
@@ -1049,6 +1060,7 @@ document.addEventListener('DOMContentLoaded', async () => {
   await loadSnapInfo();
   await loadExtractedData();
   await loadMarkdown();
+  await loadStructureMarkdown();
   await loadAssets();
   await loadFlow();
 });
@@ -1561,6 +1573,25 @@ async function loadMarkdown() {
   }
 }
 
+async function loadStructureMarkdown() {
+  try {
+    const res = await fetch(`/__archive__/api/structure/${SNAP_ID}`);
+    if (res.ok) {
+      structureMarkdownContent = await res.text();
+      if (typeof marked !== 'undefined') {
+        marked.setOptions({ breaks: true, gfm: true });
+        document.getElementById('structure-rendered').innerHTML = marked.parse(structureMarkdownContent);
+      } else {
+        document.getElementById('structure-rendered').innerHTML = `<pre>${escapeHtml(structureMarkdownContent)}</pre>`;
+      }
+    } else {
+      document.getElementById('structure-rendered').innerHTML = '<div class="empty-state"><div class="icon">🏗️</div><h2>No structure markdown</h2><p>Extract the snapshot first to generate structure markdown.</p></div>';
+    }
+  } catch(e) {
+    document.getElementById('structure-rendered').innerHTML = `<p style="color:var(--red)">Error: ${e.message}</p>`;
+  }
+}
+
 // ── Assets ──
 async function loadAssets() {
   try {
@@ -1707,6 +1738,14 @@ function downloadMD() {
 function copyMarkdown() {
   if (!markdownContent) { toast('No markdown to copy', 'error'); return; }
   navigator.clipboard.writeText(markdownContent).then(() => toast('📋 Copied to clipboard!', 'success'));
+}
+function downloadStructureMD() {
+  if (!structureMarkdownContent) { toast('No structure markdown to download', 'error'); return; }
+  downloadBlob(structureMarkdownContent, `${SNAP_ID}_structure.md`, 'text/markdown');
+}
+function copyStructureMarkdown() {
+  if (!structureMarkdownContent) { toast('No structure markdown to copy', 'error'); return; }
+  navigator.clipboard.writeText(structureMarkdownContent).then(() => toast('📋 Copied to clipboard!', 'success'));
 }
 function downloadBlob(content, name, type) {
   const a = document.createElement('a');
@@ -1988,6 +2027,20 @@ class WaybackServer:
                     md_file = snap_path / "content.md"
                     if not md_file.exists():
                         self._send(404, "text/plain", b"No markdown content")
+                        return
+                    body = md_file.read_bytes()
+                    self._send(200, "text/markdown; charset=utf-8", body)
+
+                # ── Structure markdown API ─────────────────────────────
+                elif sub.startswith("structure/"):
+                    snap_id = sub[len("structure/"):].split("?")[0]
+                    snap, snap_path = self._find_snap(snap_id)
+                    if not snap:
+                        self._send(404, "text/plain", b"Snapshot not found")
+                        return
+                    md_file = snap_path / "structure.md"
+                    if not md_file.exists():
+                        self._send(404, "text/plain", b"No structure markdown")
                         return
                     body = md_file.read_bytes()
                     self._send(200, "text/markdown; charset=utf-8", body)

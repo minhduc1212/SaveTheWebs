@@ -1059,7 +1059,7 @@ class ContentExtractor:
             from src.md_generator import MarkdownGenerator
             md_gen = MarkdownGenerator(out_path, data=data)
             md_gen.generate()
-            log("OK", f"Generated content.md for {self.snap_dir.name}")
+            log("OK", f"Generated content.md and structure.md for {self.snap_dir.name}")
         except Exception as e:
             log("WARN", f"Failed to generate markdown: {e}")
 
