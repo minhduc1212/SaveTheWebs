@@ -834,6 +834,11 @@ details[open] > summary {
 .dom-line {
   padding-left: 14px;
   margin: 2px 0;
+  border-radius: 3px;
+  transition: background 0.1s ease;
+}
+.dom-line:hover {
+  background: rgba(255, 255, 255, 0.04);
 }
 details.dom-details {
   display: block;
@@ -845,6 +850,11 @@ details.dom-details > summary {
   padding-left: 14px;
   outline: none;
   cursor: pointer;
+  border-radius: 3px;
+  transition: background 0.1s ease;
+}
+details.dom-details > summary:hover {
+  background: rgba(255, 255, 255, 0.04);
 }
 details.dom-details > summary::-webkit-details-marker {
   display: none;
@@ -1297,12 +1307,35 @@ function renderHierarchicalAreas(data) {
 
     // Parse clean HTML string and build interactive DOM tree view
     try {
+      let htmlToParse = cleanHtml.trim();
+      if (htmlToParse.toLowerCase().startsWith('<body')) {
+        const firstClose = htmlToParse.indexOf('>');
+        const lastOpen = htmlToParse.toLowerCase().lastIndexOf('</body');
+        if (firstClose !== -1 && lastOpen !== -1) {
+          htmlToParse = htmlToParse.substring(firstClose + 1, lastOpen);
+        }
+      }
+
       const parser = new DOMParser();
-      const doc = parser.parseFromString(cleanHtml, 'text/html');
-      const body = doc.body.firstElementChild || doc.body;
+      const doc = parser.parseFromString(htmlToParse, 'text/html');
       const domTree = document.getElementById('ha-dom-tree');
       if (domTree) {
-        domTree.innerHTML = renderDOMTreeRecursive(body);
+        const topLevelNodes = Array.from(doc.body.childNodes).filter(child => {
+          if (child.nodeType === 3) { // Node.TEXT_NODE
+            return child.nodeValue.trim().length > 0;
+          }
+          return child.nodeType === 1; // Node.ELEMENT_NODE
+        });
+        
+        let treeHtml = '';
+        if (topLevelNodes.length === 0) {
+          treeHtml = '<div class="empty-state">No elements in body</div>';
+        } else {
+          topLevelNodes.forEach(node => {
+            treeHtml += renderDOMTreeRecursive(node);
+          });
+        }
+        domTree.innerHTML = treeHtml;
       }
     } catch (e) {
       console.error("Failed to parse clean HTML for interactive tree: ", e);
