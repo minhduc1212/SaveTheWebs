@@ -27,7 +27,8 @@ the url in replay still go out to the real web -> make the private env that repl
 # REF
     https://github.com/internetarchive/heritrix3
     https://github.com/webrecorder/archiveweb.page
-
+    https://github.com/firecrawl/firecrawl
+    https://crawlee.dev/python/docs/introduction
 
 --> remake the old code-> get the text, data of the saved web from the title, anner, all of the data in the web -> save to json, md but still all icon, image, all web flow, to know the flow of the web, replay to show data base on new struct, from the data json got prev
   
