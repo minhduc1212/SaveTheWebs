@@ -106,24 +106,107 @@ self.addEventListener('fetch', (event) => {
     // 1. Always pass through non-HTTP(S) schemes (blob:, data:, chrome-extension:, etc.)
     if (!url.startsWith('http://') && !url.startsWith('https://')) return;
 
-    // 2. Pass through our own internal paths untouched
+    // 2. Block localhost self-referral loops (e.g. /__wb/http%3A%2F%2Flocalhost%3A...)
+    // These happen when the SW miscategorises a local URL as an archived one.
+    if (url.startsWith(self.location.origin + '/__wb/http%3A%2F%2Flocalhost') ||
+        url.startsWith(self.location.origin + '/__wb/https%3A%2F%2Flocalhost')) {
+        return; // Let it go to network (server will 404 gracefully)
+    }
+
+    // 3. Pass through our own internal paths untouched
     if (_isInternal(url, req.referrer)) return;
 
-    // 3. If the SW hasn't received routes yet, fall through to network
-    //    (this only affects the very first few ms before INIT_ROUTES arrives)
-    if (!_ready) return;
+    event.respondWith((async () => {
+        // 3. Wait up to 50ms for routes to arrive if we just started (avoids early page load race conditions)
+        if (!_ready) {
+            for (let i = 0; i < 5; i++) {
+                if (_ready) break;
+                await new Promise(r => setTimeout(r, 10));
+            }
+            if (!_ready) {
+                return fetch(req);
+            }
+        }
 
-    // 4. Determine the canonical archived URL for this request
-    const canonical = _resolve(url);
+        // Get the active window/client URL
+        let clientUrl = null;
+        if (event.clientId) {
+            try {
+                const client = await self.clients.get(event.clientId);
+                if (client) {
+                    clientUrl = client.url;
+                }
+            } catch (_) {}
+        }
 
-    if (canonical) {
-        // ── CASE A: URL is in archive — proxy through /__wb/ ─────────────────
-        event.respondWith(_serveFromArchive(req, canonical));
-    } else {
-        // ── CASE B: URL is NOT in archive — return a graceful stub ───────────
-        event.respondWith(_serveStub(req, url));
-    }
+        // Determine the original canonical URL of the request
+        const canonical = _getCanonicalUrl(url, req.referrer, clientUrl);
+        
+        if (canonical) {
+            const resolved = _resolve(canonical);
+            if (resolved) {
+                return _serveFromArchive(req, resolved);
+            }
+        }
+
+        // Fallback: If it's a localhost request, try matching by pathname
+        if (url.startsWith(self.location.origin)) {
+            try {
+                const parsed = new URL(url);
+                const resolvedPath = _resolve(parsed.pathname);
+                if (resolvedPath) {
+                    return _serveFromArchive(req, resolvedPath);
+                }
+            } catch (_) {}
+        }
+
+        // Return a graceful stub
+        return _serveStub(req, canonical || url);
+    })());
 });
+
+/**
+ * Resolve a request URL (which might have leaked to localhost origin) 
+ * back to its original canonical absolute archived URL using Referer or Client URL.
+ */
+function _getCanonicalUrl(requestUrl, referrer, clientUrl) {
+    // If it's already an absolute URL to an external domain, it's canonical
+    if (!requestUrl.startsWith(self.location.origin)) {
+        return requestUrl;
+    }
+
+    let archivedPageUrl = null;
+    // Extract the encoded archived page URL from Referer or Client URL
+    for (const ref of [referrer, clientUrl]) {
+        if (ref && ref.includes('/__wb/')) {
+            const idx = ref.indexOf('/__wb/');
+            const encoded = ref.substring(idx + 6).split('?')[0];
+            try {
+                archivedPageUrl = decodeURIComponent(encoded);
+                break;
+            } catch (_) {}
+        }
+    }
+
+    if (!archivedPageUrl) {
+        return null;
+    }
+
+    try {
+        const parsedRef = new URL(archivedPageUrl);
+        const refOrigin = parsedRef.origin;
+        const reqParsed = new URL(requestUrl);
+        
+        // Resolve path relative to the archived page URL's origin or path
+        if (reqParsed.pathname.startsWith('/')) {
+            return refOrigin + reqParsed.pathname + reqParsed.search;
+        } else {
+            return new URL(reqParsed.pathname + reqParsed.search, archivedPageUrl).href;
+        }
+    } catch (_) {
+        return null;
+    }
+}
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -150,14 +233,28 @@ function _isInternal(url, referrer) {
             return true;
         }
 
-        // 2. If the request is initiated by a system page (Dashboard or View UI),
+        // 2. External domains that should ALWAYS bypass the SW
+        //    (Google Fonts, favicon APIs, CDNs used by dashboard/view UI)
+        const externalPassthrough = [
+            'fonts.googleapis.com',
+            'fonts.gstatic.com',
+            'www.google.com',    // favicon API
+            'cdn.jsdelivr.net',  // mermaid, marked CDN used by View UI
+        ];
+        if (externalPassthrough.some(d => parsed.hostname === d || parsed.hostname.endsWith('.' + d))) {
+            return true;
+        }
+
+        // 3. If the request is initiated by a system page (Dashboard or View UI),
         // it must NOT be intercepted (let it access the real internet/fonts/favicons).
         if (referrer) {
-            const refParsed = new URL(referrer);
-            const refPath = refParsed.pathname;
-            if (refPath.startsWith('/__archive__') || refPath.startsWith('/__view/')) {
-                return true;
-            }
+            try {
+                const refParsed = new URL(referrer);
+                const refPath = refParsed.pathname;
+                if (refPath.startsWith('/__archive__') || refPath.startsWith('/__view/')) {
+                    return true;
+                }
+            } catch (_) {}
         }
     } catch (_) {}
     return false;
@@ -179,6 +276,12 @@ function _resolve(url) {
         const p = new URL(url);
         const noQuery = p.origin + p.pathname;
         if (_variantMap.has(noQuery)) return _variantMap.get(noQuery);
+    } catch (_) {}
+
+    // 4. Try matching by path-only (pathname) as a last-resort fallback for local/leak URLs
+    try {
+        const p = new URL(url);
+        if (_variantMap.has(p.pathname)) return _variantMap.get(p.pathname);
     } catch (_) {}
 
     return null;
@@ -244,6 +347,11 @@ function _serveStub(req, url) {
             ? '{"data":{}}'
             : JSON.stringify({ code: 0, data: null, msg: '', __wr_stub: true });
         return _makeResponse(200, 'application/json; charset=utf-8', body);
+    }
+
+    // ── HTML Document / Iframe ────────────────────────────────────────────
+    if (dest === 'document' || dest === 'iframe' || accept.includes('text/html')) {
+        return _makeResponse(200, 'text/html; charset=utf-8', '<!DOCTYPE html><html><body></body></html>');
     }
 
     // ── Images ────────────────────────────────────────────────────────────

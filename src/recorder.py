@@ -121,8 +121,7 @@ class WebRecorder:
                 log("WARN", f"Skipping large file (>10MB): {url[:60]}")
                 return
                 
-            _SKIP_EXTS = {".zip", ".exe", ".dmg", ".pkg", ".tar", ".gz", ".rar", ".7z", 
-                          ".mp4", ".mkv", ".avi", ".mov", ".iso", ".bin", ".apk", ".msi"}
+            _SKIP_EXTS = {".zip", ".exe", ".dmg", ".pkg", ".tar", ".gz", ".rar", ".7z", ".mp4", ".mkv", ".avi", ".mov", ".iso", ".bin", ".apk", ".msi"}
             if any(url.lower().split("?")[0].endswith(ext) for ext in _SKIP_EXTS):
                 log("WARN", f"Skipping binary extension: {url[:60]}")
                 return
@@ -395,7 +394,7 @@ class WebRecorder:
             except Exception as e:
                 log("WARN", f"Failed to initialize CDP session: {e}")
 
-            # Inject storage interceptor and disable webdriver detection
+            # Inject storage interceptor, disable webdriver detection, and log clicks
             await page.add_init_script("""
             (()=>{
               Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
@@ -404,6 +403,61 @@ class WebRecorder:
               localStorage.setItem=(k,v)=>{ cap({t:'ls',k,v}); return _ls(k,v); };
               const _ss=sessionStorage.setItem.bind(sessionStorage);
               sessionStorage.setItem=(k,v)=>{ cap({t:'ss',k,v}); return _ss(k,v); };
+
+              // Interaction Logger (User Clicks)
+              window._wr_clicks = window._wr_clicks || [];
+              document.addEventListener('click', (e) => {
+                try {
+                  const el = e.target;
+                  if (!el) return;
+
+                  const getSelector = (element) => {
+                    if (element.id) return '#' + element.id;
+                    let path = [];
+                    let curr = element;
+                    while (curr && curr.nodeType === Node.ELEMENT_NODE) {
+                      let selector = curr.nodeName.toLowerCase();
+                      if (curr.className) {
+                        const classes = Array.from(curr.classList)
+                          .map(c => typeof c === 'string' ? c.trim() : '')
+                          .filter(c => c && !c.includes(':') && !c.includes('/') && !c.includes('{'))
+                          .join('.');
+                        if (classes) selector += '.' + classes;
+                      }
+
+                      let sibIndex = 0;
+                      let sibCount = 0;
+                      for (let sib = curr.previousSibling; sib; sib = sib.previousSibling) {
+                        if (sib.nodeType === Node.ELEMENT_NODE && sib.nodeName === curr.nodeName) sibIndex++;
+                      }
+                      for (let sib = curr.nextSibling; sib; sib = sib.nextSibling) {
+                        if (sib.nodeType === Node.ELEMENT_NODE && sib.nodeName === curr.nodeName) sibCount++;
+                      }
+                      if (sibIndex > 0 || sibCount > 0) {
+                        selector += `:nth-of-type(${sibIndex + 1})`;
+                      }
+                      path.unshift(selector);
+                      curr = curr.parentNode;
+                    }
+                    return path.join(' > ');
+                  };
+
+                  window._wr_clicks.push({
+                    timestamp: Date.now(),
+                    clientX: e.clientX,
+                    clientY: e.clientY,
+                    pageX: e.pageX,
+                    pageY: e.pageY,
+                    tagName: el.tagName,
+                    id: el.id || '',
+                    className: el.className || '',
+                    text: (el.textContent || '').trim().substring(0, 100),
+                    selector: getSelector(el)
+                  });
+                } catch (err) {
+                  // Prevent logger issues from crashing the web page's normal click handling
+                }
+              }, true);
             })();
             """)
 
@@ -449,6 +503,89 @@ class WebRecorder:
             # ── Phase 3: Follow CSS @import chains ───────────────────────────
             await self._follow_css_imports(page)
 
+            # ── Anti-Overlay Injector (Before saving HTML) ───────────────────
+            log("INFO", "Running Anti-Overlay Injector to clean DOM...")
+            anti_overlay_script = """
+            (() => {
+              const removed = [];
+              const elements = document.querySelectorAll('*');
+              const vw = window.innerWidth;
+              const vh = window.innerHeight;
+              
+              for (const el of elements) {
+                try {
+                  if (el === document.documentElement || el === document.body) continue;
+                  
+                  const style = window.getComputedStyle(el);
+                  if (!style) continue;
+                  
+                  // Check positioning: absolute or fixed
+                  const pos = style.position;
+                  if (pos !== 'absolute' && pos !== 'fixed') continue;
+                  
+                  // Check extreme z-index values (e.g., >= 999 or <= -999)
+                  const zIndexStr = style.zIndex;
+                  const zIndex = parseInt(zIndexStr, 10);
+                  const hasExtremeZIndex = !isNaN(zIndex) && (Math.abs(zIndex) >= 999);
+                  if (!hasExtremeZIndex) continue;
+                  
+                  // Check size covering >90% of the viewport
+                  const rect = el.getBoundingClientRect();
+                  const coversViewport = (rect.width >= vw * 0.9) && (rect.height >= vh * 0.9);
+                  if (!coversViewport) continue;
+                  
+                  // Check low opacity / transparent background
+                  const opacity = parseFloat(style.opacity);
+                  const isLowOpacity = !isNaN(opacity) && (opacity < 0.2);
+                  
+                  const bg = style.backgroundColor;
+                  let isTransparentBg = false;
+                  if (!bg || bg === 'transparent' || bg === 'rgba(0, 0, 0, 0)') {
+                    isTransparentBg = true;
+                  } else {
+                    const rgbaMatch = bg.match(/rgba?\\(\\s*\\d+\\s*,\\s*\\d+\\s*,\\s*\\d+\\s*(?:,\\s*([\\d.]+)\\s*)?\\)/i);
+                    if (rgbaMatch) {
+                      const alpha = rgbaMatch[1] !== undefined ? parseFloat(rgbaMatch[1]) : 1;
+                      if (alpha < 0.1) isTransparentBg = true;
+                    }
+                    const hslaMatch = bg.match(/hsla?\\(\\s*[\\d.]+\\s*,\\s*[\\d.]%?\\s*,\\s*[\\d.]%?\\s*(?:,\\s*([\\d.]+)\\s*)?\\)/i);
+                    if (hslaMatch) {
+                      const alpha = hslaMatch[1] !== undefined ? parseFloat(hslaMatch[1]) : 1;
+                      if (alpha < 0.1) isTransparentBg = true;
+                    }
+                  }
+                  
+                  if (isLowOpacity || isTransparentBg) {
+                    const selector = el.tagName + (el.id ? '#' + el.id : '') + (el.className ? '.' + Array.from(el.classList).join('.') : '');
+                    removed.push({
+                      selector: selector,
+                      zIndex: zIndexStr,
+                      position: pos,
+                      width: rect.width,
+                      height: rect.height,
+                      opacity: style.opacity,
+                      bg: bg
+                    });
+                    el.remove();
+                  }
+                } catch (err) {
+                  // Prevent loop errors
+                }
+              }
+              return removed;
+            })()
+            """
+            try:
+                removed_overlays = await page.evaluate(anti_overlay_script)
+                if removed_overlays:
+                    log("OK", f"Anti-Overlay: Removed {len(removed_overlays)} overlay elements from DOM:")
+                    for idx, ov in enumerate(removed_overlays):
+                        log("INFO", f"  [{idx+1}] {ov['selector']} (z-index: {ov['zIndex']}, pos: {ov['position']}, size: {ov['width']}x{ov['height']}, opacity: {ov['opacity']}, bg: {ov['bg']})")
+                else:
+                    log("INFO", "Anti-Overlay: No overlays matching criteria were found.")
+            except Exception as e:
+                log("WARN", f"Anti-Overlay cleanup failed: {e}")
+
             # ── Phase 4: Save final rendered HTML ────────────────────────────
             try:
                 html = await page.content()
@@ -459,6 +596,18 @@ class WebRecorder:
             # ── Phase 5: MHTML snapshot ──────────────────────────────────────
             if cdp:
                 await self._save_mhtml(cdp)
+
+            # ── Phase 6: Save User Interactions (Clicks) ──────────────────────
+            try:
+                clicks = await page.evaluate("() => window._wr_clicks || []")
+                if clicks:
+                    import json
+                    (self.store.path / "interactions.json").write_text(
+                        json.dumps(clicks, ensure_ascii=False, indent=2), "utf-8"
+                    )
+                    log("OK", f"Logged {len(clicks)} user clicks to interactions.json")
+            except Exception as e:
+                log("WARN", f"Failed to save user clicks: {e}")
 
             cookies = await ctx.cookies()
             if cookies:

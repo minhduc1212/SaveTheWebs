@@ -106,6 +106,89 @@ def rewrite_css(css_text: str, all_routes: dict, base_url: str = "") -> str:
     return css_text
 
 
+def rewrite_js(js_code: str) -> str:
+    """
+    Rewrite references to window.location, document.location, and location properties in JS code
+    to point to our proxy window.__wr_location.
+    """
+    # 1. Rewrite window.location / document.location to window.__wr_location
+    js_code = re.sub(r'\bwindow\s*\.\s*location\b', 'window.__wr_location', js_code)
+    js_code = re.sub(r'\bdocument\s*\.\s*location\b', 'window.__wr_location', js_code)
+    
+    # 2. Rewrite location.prop to window.__wr_location.prop
+    js_code = re.sub(
+        r'(?<!\.)\blocation\s*\.\s*(href|pathname|origin|host|hostname|port|protocol|search|hash|assign|replace|reload)\b',
+        r'window.__wr_location.\1',
+        js_code
+    )
+    
+    # 3. Rewrite location['prop'] to window.__wr_location['prop']
+    js_code = re.sub(
+        r'(?<!\.)\blocation\s*\[\s*(["\'])(href|pathname|origin|host|hostname|port|protocol|search|hash|assign|replace|reload)\1\s*\]',
+        r'window.__wr_location[\1\2\1]',
+        js_code
+    )
+    
+    return js_code
+
+
+
+def strip_tracking_and_ads(html: str) -> str:
+    """
+    Strip third-party tracking scripts, analytics, and external ad iframes from the HTML payload.
+    """
+    # Regex to find <script>...</script> (both src and inline)
+    script_pattern = re.compile(r'<script\b([^>]*?)>([\s\S]*?)</script>', re.IGNORECASE)
+    
+    # Domains or keywords for tracking
+    tracking_indicators = [
+        "google-analytics.com", "googletagmanager.com", "googlesyndication.com",
+        "doubleclick.net", "facebook.net", "mixpanel.com", "hotjar.com",
+        "amplitude.com", "sentry.io", "quantserve.com", "scorecardresearch.com",
+        "crazyegg.com", "optimizely.com", "gtag(", "ga('send'", "ga(\"send\"",
+        "fbq(", "mixpanel.track", "Sentry.init", "amplitude.getInstance"
+    ]
+    
+    def script_replacer(match):
+        attrs = match.group(1)
+        content = match.group(2)
+        
+        # Check if src attribute contains tracking domains
+        src_match = re.search(r'src=["\']([^"\']+)["\']', attrs, re.IGNORECASE)
+        if src_match:
+            src = src_match.group(1)
+            if any(ind in src for ind in tracking_indicators if "." in ind):
+                return "<!-- Stripped tracking script -->"
+        
+        # Check inline content
+        if any(ind in content for ind in tracking_indicators if "(" in ind or "." in ind):
+            return "<!-- Stripped inline tracking code -->"
+            
+        return match.group(0)
+        
+    html = script_pattern.sub(script_replacer, html)
+    
+    # Regex to find <iframe...>...</iframe> and <iframe... />
+    iframe_pattern = re.compile(r'<iframe\b([^>]*?)(?:>([\s\S]*?)</iframe>|/>)', re.IGNORECASE)
+    ad_iframe_indicators = [
+        "googleads", "doubleclick", "googlesyndication", "adnxs", "adsystem",
+        "adservice", "smartadserver", "taboola", "outbrain", "adroll", "popads",
+        "clickunder", "popunder"
+    ]
+    
+    def iframe_replacer(match):
+        attrs = match.group(1)
+        src_match = re.search(r'src=["\']([^"\']+)["\']', attrs, re.IGNORECASE)
+        if src_match:
+            src = src_match.group(1)
+            if any(ind in src for ind in ad_iframe_indicators):
+                return "<!-- Stripped ad iframe -->"
+        return match.group(0)
+        
+    html = iframe_pattern.sub(iframe_replacer, html)
+    return html
+
+
 def rewrite_html(html: str, all_routes: dict, base_url: str = "", tokens_script: str = "", is_final_page: bool = False) -> str:
     """
     Rewrite all href/src/action/srcset/data-src attributes that point to
@@ -118,8 +201,13 @@ def rewrite_html(html: str, all_routes: dict, base_url: str = "", tokens_script:
     - Rewrites <style> blocks
     - Injects tokens_script to restore cookies and localStorage
     """
-    if is_final_page:
-        html = re.sub(r'<script\b[^>]*>[\s\S]*?</script>', '', html, flags=re.IGNORECASE)
+    # Strip third-party tracking scripts, analytics, and external ad iframes
+    html = strip_tracking_and_ads(html)
+
+    # We no longer strip all scripts on final page to maintain basic UI interactions (JS-driven).
+    # Tracking scripts are stripped, and background APIs are neutralized with mocks instead.
+    # if is_final_page:
+    #     html = re.sub(r'<script\b[^>]*>[\s\S]*?</script>', '', html, flags=re.IGNORECASE)
 
     url_index = _build_url_index(all_routes)
 
@@ -127,30 +215,34 @@ def rewrite_html(html: str, all_routes: dict, base_url: str = "", tokens_script:
     spa_script = """<script>
 (function() {
   try {
-    var originalPathname = Object.getOwnPropertyDescriptor(Location.prototype, 'pathname');
-    var originalHref = Object.getOwnPropertyDescriptor(Location.prototype, 'href');
-    var originalOrigin = Object.getOwnPropertyDescriptor(Location.prototype, 'origin');
-    var originalHost = Object.getOwnPropertyDescriptor(Location.prototype, 'host');
-    var originalHostname = Object.getOwnPropertyDescriptor(Location.prototype, 'hostname');
-    
-    var realOrigin = originalOrigin ? originalOrigin.get.call(window.location) : window.location.origin;
-    var realHref = originalHref ? originalHref.get.call(window.location) : window.location.href;
+    // Native fetch & XMLHttpRequest are left intact to be intercepted by the Service Worker and served with recorded archive responses.
 
-    window.__wr_path = function() {
-      try {
-        var p = originalPathname ? originalPathname.get.call(window.location) : window.location.pathname;
-        if (p.indexOf('/__wb/') === 0) {
-          var nextSlash = p.indexOf('/', 6);
-          if (nextSlash === -1) return '/';
-          return p.substring(nextSlash) || '/';
-        }
-        return p;
-      } catch(e) { return '/'; }
-    };
+    // Robustly fetch native property descriptors from both Location.prototype and window.location
+    var originalPathname = Object.getOwnPropertyDescriptor(Location.prototype, 'pathname') || Object.getOwnPropertyDescriptor(window.location, 'pathname');
+    var originalHref = Object.getOwnPropertyDescriptor(Location.prototype, 'href') || Object.getOwnPropertyDescriptor(window.location, 'href');
+    var originalOrigin = Object.getOwnPropertyDescriptor(Location.prototype, 'origin') || Object.getOwnPropertyDescriptor(window.location, 'origin');
+    var originalHost = Object.getOwnPropertyDescriptor(Location.prototype, 'host') || Object.getOwnPropertyDescriptor(window.location, 'host');
+    var originalHostname = Object.getOwnPropertyDescriptor(Location.prototype, 'hostname') || Object.getOwnPropertyDescriptor(window.location, 'hostname');
+    var originalProtocol = Object.getOwnPropertyDescriptor(Location.prototype, 'protocol') || Object.getOwnPropertyDescriptor(window.location, 'protocol');
+    var originalPort = Object.getOwnPropertyDescriptor(Location.prototype, 'port') || Object.getOwnPropertyDescriptor(window.location, 'port');
+    var originalSearch = Object.getOwnPropertyDescriptor(Location.prototype, 'search') || Object.getOwnPropertyDescriptor(window.location, 'search');
+    var originalHash = Object.getOwnPropertyDescriptor(Location.prototype, 'hash') || Object.getOwnPropertyDescriptor(window.location, 'hash');
     
+    // Save native getters and setters securely (avoiding property access on window.location during runtime)
+    var nativeHrefGet = originalHref && originalHref.get;
+    var nativeHrefSet = originalHref && originalHref.set;
+    var nativeOriginGet = originalOrigin && originalOrigin.get;
+
+    // Establish a static fallback for the original page address URL
+    var realOrigin = nativeOriginGet ? nativeOriginGet.call(window.location) : window.location.origin;
+    var realHref = nativeHrefGet ? nativeHrefGet.call(window.location) : window.location.href;
+    
+    // Maintain a tracked variable of the current browser-side address-bar URL
+    window.__wr_current_real_href = realHref;
+
     window.__wr_href = function() {
       try {
-        var h = originalHref ? originalHref.get.call(window.location) : window.location.href;
+        var h = nativeHrefGet ? nativeHrefGet.call(window.location) : window.__wr_current_real_href;
         var idx = h.indexOf('/__wb/');
         if (idx !== -1) {
           var rest = h.substring(idx + 6);
@@ -162,44 +254,227 @@ def rewrite_html(html: str, all_routes: dict, base_url: str = "", tokens_script:
           return targetUrl;
         }
         return h;
-      } catch(e) { return ''; }
+      } catch(e) { return window.__wr_current_real_href || ''; }
+    };
+
+    window.__wr_path = function() {
+      try {
+        var cleanUrl = window.__wr_href();
+        return new URL(cleanUrl).pathname || '/';
+      } catch(e) { return '/'; }
     };
     
     window.__wr_origin = function() {
       try { return new URL(window.__wr_href()).origin; } 
-      catch(e) { return originalOrigin ? originalOrigin.get.call(window.location) : window.location.origin; }
+      catch(e) { return realOrigin; }
     };
     
     window.__wr_host = function() {
       try { return new URL(window.__wr_href()).host; } 
-      catch(e) { return originalHost ? originalHost.get.call(window.location) : window.location.host; }
+      catch(e) { return ''; }
     };
   
     window.__wr_hostname = function() {
       try { return new URL(window.__wr_href()).hostname; } 
-      catch(e) { return originalHostname ? originalHostname.get.call(window.location) : window.location.hostname; }
+      catch(e) { return ''; }
+    };
+
+    window.__wr_protocol = function() {
+      try { return new URL(window.__wr_href()).protocol; } 
+      catch(e) { return 'http:'; }
+    };
+
+    window.__wr_port = function() {
+      try { return new URL(window.__wr_href()).port || ''; } 
+      catch(e) { return ''; }
+    };
+
+    window.__wr_search = function() {
+      try { return new URL(window.__wr_href()).search || ''; } 
+      catch(e) { return ''; }
+    };
+
+    window.__wr_hash = function() {
+      try { return new URL(window.__wr_href()).hash || ''; } 
+      catch(e) { return ''; }
+    };
+
+    var setLocationUrl = function(url) {
+      if (!url) return;
+      var absUrl = url;
+      try {
+        absUrl = new URL(url, window.__wr_href()).href;
+      } catch(e) {}
+      if (absUrl && typeof absUrl === 'string' && absUrl.startsWith('http') && absUrl.indexOf(realOrigin) !== 0) {
+        absUrl = realOrigin + '/__wb/' + encodeURIComponent(absUrl);
+      }
+      window.__wr_current_real_href = absUrl;
+      if (nativeHrefSet) {
+        nativeHrefSet.call(window.location, absUrl);
+      } else {
+        try {
+          window.location.href = absUrl;
+        } catch(err) {}
+      }
     };
   
+    window.__wr_location = new Proxy(window.location, {
+      get: function(target, prop) {
+        if (prop === 'href') return window.__wr_href();
+        if (prop === 'pathname') return window.__wr_path();
+        if (prop === 'origin') return window.__wr_origin();
+        if (prop === 'host') return window.__wr_host();
+        if (prop === 'hostname') return window.__wr_hostname();
+        if (prop === 'protocol') return window.__wr_protocol();
+        if (prop === 'port') return window.__wr_port();
+        if (prop === 'search') return window.__wr_search();
+        if (prop === 'hash') return window.__wr_hash();
+        if (prop === 'toString' || prop === Symbol.toPrimitive) {
+          return function() { return window.__wr_href(); };
+        }
+        var val = target[prop];
+        if (typeof val === 'function') {
+          return val.bind(target);
+        }
+        return val;
+      },
+      set: function(target, prop, val) {
+        if (prop === 'href') {
+          setLocationUrl(val);
+          return true;
+        }
+        if (prop === 'pathname' || prop === 'host' || prop === 'hostname' || prop === 'protocol' || prop === 'port' || prop === 'search' || prop === 'hash') {
+          try {
+            var u = new URL(window.__wr_href());
+            u[prop] = val;
+            setLocationUrl(u.href);
+          } catch(e) {}
+          return true;
+        }
+        try {
+          target[prop] = val;
+        } catch(e) {}
+        return true;
+      }
+    });
+
     var safeDefine = function(obj, prop, desc) {
       try { Object.defineProperty(obj, prop, desc); } catch(e) {}
     };
 
-    safeDefine(Location.prototype, 'pathname', { get: window.__wr_path, set: function(val) { console.warn('Blocked pathname assignment: ' + val); }, configurable: true });
-    safeDefine(Location.prototype, 'href', { get: window.__wr_href, set: function(val) { console.warn('Blocked href assignment to: ' + val); }, configurable: true });
+    safeDefine(Location.prototype, 'pathname', {
+      get: window.__wr_path,
+      set: function(val) {
+        try {
+          var u = new URL(window.__wr_href());
+          u.pathname = val;
+          setLocationUrl(u.href);
+        } catch(e) {}
+      },
+      configurable: true
+    });
+
+    safeDefine(Location.prototype, 'href', {
+      get: window.__wr_href,
+      set: setLocationUrl,
+      configurable: true
+    });
+
     safeDefine(Location.prototype, 'origin', { get: window.__wr_origin, configurable: true });
-    safeDefine(Location.prototype, 'host', { get: window.__wr_host, set: function(val) { console.warn('Blocked host assignment: ' + val); }, configurable: true });
-    safeDefine(Location.prototype, 'hostname', { get: window.__wr_hostname, set: function(val) { console.warn('Blocked hostname assignment: ' + val); }, configurable: true });
+    
+    safeDefine(Location.prototype, 'host', {
+      get: window.__wr_host,
+      set: function(val) {
+        try {
+          var u = new URL(window.__wr_href());
+          u.host = val;
+          setLocationUrl(u.href);
+        } catch(e) {}
+      },
+      configurable: true
+    });
+
+    safeDefine(Location.prototype, 'hostname', {
+      get: window.__wr_hostname,
+      set: function(val) {
+        try {
+          var u = new URL(window.__wr_href());
+          u.hostname = val;
+          setLocationUrl(u.href);
+        } catch(e) {}
+      },
+      configurable: true
+    });
+
+    safeDefine(Location.prototype, 'protocol', {
+      get: window.__wr_protocol,
+      set: function(val) {
+        try {
+          var u = new URL(window.__wr_href());
+          u.protocol = val;
+          setLocationUrl(u.href);
+        } catch(e) {}
+      },
+      configurable: true
+    });
+
+    safeDefine(Location.prototype, 'port', {
+      get: window.__wr_port,
+      set: function(val) {
+        try {
+          var u = new URL(window.__wr_href());
+          u.port = val;
+          setLocationUrl(u.href);
+        } catch(e) {}
+      },
+      configurable: true
+    });
+
+    safeDefine(Location.prototype, 'search', {
+      get: window.__wr_search,
+      set: function(val) {
+        try {
+          var u = new URL(window.__wr_href());
+          u.search = val;
+          setLocationUrl(u.href);
+        } catch(e) {}
+      },
+      configurable: true
+    });
+
+    safeDefine(Location.prototype, 'hash', {
+      get: window.__wr_hash,
+      set: function(val) {
+        if (originalHref && originalHref.set) {
+          var currentRealHref = originalHref.get.call(window.location);
+          var hashIdx = currentRealHref.indexOf('#');
+          var base = hashIdx === -1 ? currentRealHref : currentRealHref.substring(0, hashIdx);
+          if (val && val.indexOf('#') !== 0) val = '#' + val;
+          originalHref.set.call(window.location, base + val);
+        }
+      },
+      configurable: true
+    });
+
+    safeDefine(Location.prototype, 'reload', {
+      value: function() {
+        if (originalHref && originalHref.set) {
+          originalHref.set.call(window.location, originalHref.get.call(window.location));
+        } else {
+          window.location.reload();
+        }
+      },
+      configurable: true
+    });
+
+    safeDefine(Location.prototype, 'replace', { value: setLocationUrl, configurable: true });
+    safeDefine(Location.prototype, 'assign', { value: setLocationUrl, configurable: true });
+    safeDefine(Location.prototype, 'toString', { value: window.__wr_href, configurable: true });
+    safeDefine(Location.prototype, 'valueOf', { value: window.__wr_href, configurable: true });
+
     safeDefine(document, 'URL', { get: window.__wr_href, configurable: true });
     safeDefine(document, 'domain', { get: window.__wr_hostname, configurable: true });
     safeDefine(window, 'origin', { get: window.__wr_origin, configurable: true });
-    
-    safeDefine(Location.prototype, 'search', { set: function(val) { console.warn('Blocked search: ' + val); }, configurable: true, get: function() { return ''; } });
-    safeDefine(Location.prototype, 'protocol', { set: function(val) { console.warn('Blocked protocol: ' + val); }, configurable: true, get: function() { return 'http:'; } });
-    safeDefine(Location.prototype, 'port', { set: function(val) { console.warn('Blocked port: ' + val); }, configurable: true, get: function() { return ''; } });
-    safeDefine(Location.prototype, 'hash', { set: function(val) { console.warn('Blocked hash: ' + val); }, configurable: true, get: function() { return ''; } });
-    safeDefine(Location.prototype, 'reload', { value: function() { console.warn('Blocked location.reload()'); }, configurable: true });
-    safeDefine(Location.prototype, 'replace', { value: function(url) { console.warn('Blocked location.replace: ' + url); }, configurable: true });
-    safeDefine(Location.prototype, 'assign', { value: function(url) { console.warn('Blocked location.assign: ' + url); }, configurable: true });
 
     // Intercept window.open
     var originalWindowOpen = window.open;
@@ -267,26 +542,35 @@ def rewrite_html(html: str, all_routes: dict, base_url: str = "", tokens_script:
       };
     } catch(e) {}
 
-    // Fallback: block navigation
-    window.addEventListener('beforeunload', function (e) {
-      console.warn('Navigation blocked by WebRecorder fallback');
-      e.preventDefault();
-      e.returnValue = 'Navigation blocked';
-      return 'Navigation blocked';
-    });
+    // NOTE: We intentionally do NOT block beforeunload, because it prevents the
+    // user from clicking into replay pages and navigating within them.
 
     var originalPushState = history.pushState;
     var originalReplaceState = history.replaceState;
+    var stateCallCount = 0;
     function wrapStateMethod(original) {
       return function(state, unused, url) {
+        stateCallCount++;
+        if (stateCallCount > 100) {
+          if (stateCallCount % 100 === 0) {
+            console.warn('wrapStateMethod called ' + stateCallCount + ' times for URL: ' + url);
+          }
+          if (stateCallCount > 500) {
+            return;
+          }
+        }
         if (url) {
+          try {
+            var absUrl = new URL(url, window.__wr_href()).href;
+            window.__wr_current_real_href = absUrl;
+          } catch(e) {}
           var currentWb = '';
-          var p = originalPathname.get.call(window.location);
+          var p = (originalPathname && originalPathname.get) ? originalPathname.get.call(window.location) : window.__wr_path();
           if (p.indexOf('/__wb/') === 0) {
             var nextSlash = p.indexOf('/', 6);
             currentWb = nextSlash === -1 ? p : p.substring(0, nextSlash);
           }
-          if (currentWb) {
+          if (currentWb && url.indexOf('/__wb/') === -1 && url.indexOf(currentWb) === -1) {
             if (url.indexOf('/') === 0) {
               url = currentWb + url;
             } else if (url.indexOf('http://') !== 0 && url.indexOf('https://') !== 0) {
@@ -456,6 +740,23 @@ def rewrite_html(html: str, all_routes: dict, base_url: str = "", tokens_script:
     html = re.sub(
         r'(<style[^>]*>)(.*?)(</style>)',
         rewrite_style_block, html, flags=re.IGNORECASE | re.DOTALL
+    )
+
+    # 3.5 Rewrite Location properties in inline scripts
+    def rewrite_inline_script(m: re.Match) -> str:
+        open_tag = m.group(1)
+        js_content = m.group(2)
+        close_tag = m.group(3)
+        if js_content.strip() and "src=" not in open_tag.lower():
+            try:
+                js_content = rewrite_js(js_content)
+            except Exception:
+                pass
+        return f"{open_tag}{js_content}{close_tag}"
+
+    html = re.sub(
+        r'(<script[^>]*>)(.*?)(</script>)',
+        rewrite_inline_script, html, flags=re.IGNORECASE | re.DOTALL
     )
 
     # 4. CSS url() in inline style attributes

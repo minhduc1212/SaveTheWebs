@@ -78,4 +78,4 @@ remake Hierarchical Areas that display the data: text, img, ... with the struct 
 i want the old version of showing the html code in hierachy struct that: contain like a json file, can open, minize, maximize, like a element in chrome dev tool, this current of html code in Hierarchical Areas is so hard to see, very confusing
 
 auto exact when record, after record -> get all need data: json, md, replay,.. not to click exact in web replay
-the button, click, ... has to work like the original web when replay (Ex: if ads -> click to close)
+the javascriipt to control the button, click, the things affect to the work of web has to work like the original web when replay (Ex: if ads -> click to close), remove the Invisible Overlay, Clickjacking, Pop-under

@@ -1,6 +1,7 @@
 import json
 import mimetypes
 import re
+import time
 import urllib.parse
 import http.server
 import socketserver
@@ -9,6 +10,30 @@ from pathlib import Path
 from src.archive import ArchiveIndex
 from src.rewriter import rewrite_html, rewrite_css
 from src.utils import DEFAULT_ARCHIVE, log
+
+# ── In-process content rewrite cache ─────────────────────────────────────────
+# Caches rewritten JS/CSS bytes keyed by (filepath, mtime) to avoid
+# re-running expensive regex rewrites on every request for the same file.
+# This is critical for large SPA JS bundles (e.g. Nuxt/Vue 900KB files).
+_rewrite_cache: dict = {}   # (str(filepath), mtime_float) -> bytes
+_CACHE_MAX = 256            # evict LRU if cache grows beyond this many entries
+
+def _cache_get(filepath: Path) -> bytes | None:
+    try:
+        mtime = filepath.stat().st_mtime
+        return _rewrite_cache.get((str(filepath), mtime))
+    except Exception:
+        return None
+
+def _cache_put(filepath: Path, data: bytes):
+    try:
+        mtime = filepath.stat().st_mtime
+        if len(_rewrite_cache) >= _CACHE_MAX:
+            # Evict oldest entry (first key)
+            _rewrite_cache.pop(next(iter(_rewrite_cache)))
+        _rewrite_cache[(str(filepath), mtime)] = data
+    except Exception:
+        pass
 
 # ── Dashboard HTML ────────────────────────────────────────────────────────────
 # PERF: Data is loaded via fetch() at runtime instead of embedded in the HTML.
@@ -765,151 +790,6 @@ body{font-family:'Inter',system-ui,sans-serif;background:var(--bg);color:var(--t
   .main-wrap,.tabs-wrap,.search-wrap,.banner{padding-left:16px;padding-right:16px}
   .assets-grid{grid-template-columns:repeat(auto-fill,minmax(150px,1fr))}
 }
-
-/* ── Hierarchical Tree View ── */
-.tree-nested {
-  margin-left: 16px;
-  border-left: 1px dashed #4b5563;
-  padding-left: 12px;
-  margin-bottom: 8px;
-}
-.tree-nested-list {
-  margin-left: 16px;
-  border-left: 1px dashed #8b5cf6;
-  padding-left: 12px;
-  margin-bottom: 8px;
-}
-.tree-list-item {
-  background: rgba(30, 41, 59, 0.5);
-  border-radius: 8px;
-  padding: 10px 14px;
-  margin-bottom: 10px;
-  border: 1px solid #334155;
-}
-.tree-key {
-  color: #a78bfa;
-  font-weight: 600;
-  font-family: monospace;
-}
-.tree-key-dict {
-  color: #60a5fa;
-  font-weight: 700;
-  cursor: pointer;
-  font-family: monospace;
-}
-.tree-key-list {
-  color: #34d399;
-  font-weight: 700;
-  cursor: pointer;
-  font-family: monospace;
-}
-.tree-val {
-  color: #e2e8f0;
-}
-.tree-img-thumb {
-  max-width: 90px;
-  max-height: 90px;
-  border-radius: 6px;
-  cursor: pointer;
-  vertical-align: middle;
-  margin: 4px 8px;
-  border: 1px solid #475569;
-  transition: transform 0.2s, box-shadow 0.2s;
-}
-.tree-img-thumb:hover {
-  transform: scale(1.08);
-  box-shadow: 0 4px 12px rgba(139, 92, 246, 0.3);
-}
-details[open] > summary {
-  margin-bottom: 6px;
-}
-/* ── Collapsible DOM Tree (DevTools style) ── */
-.dom-tree-container {
-  font-family: 'JetBrains Mono', monospace;
-  font-size: 0.85rem;
-  line-height: 1.6;
-  color: var(--text2);
-  user-select: text;
-}
-.dom-line {
-  padding-left: 14px;
-  margin: 2px 0;
-  border-radius: 3px;
-  transition: background 0.1s ease;
-}
-.dom-line:hover {
-  background: rgba(255, 255, 255, 0.04);
-}
-details.dom-details {
-  display: block;
-  margin: 2px 0;
-}
-details.dom-details > summary {
-  list-style: none;
-  position: relative;
-  padding-left: 14px;
-  outline: none;
-  cursor: pointer;
-  border-radius: 3px;
-  transition: background 0.1s ease;
-}
-details.dom-details > summary:hover {
-  background: rgba(255, 255, 255, 0.04);
-}
-details.dom-details > summary::-webkit-details-marker {
-  display: none;
-}
-details.dom-details > summary::before {
-  content: "▶";
-  position: absolute;
-  left: 2px;
-  top: 1px;
-  font-size: 0.65rem;
-  color: var(--text3);
-  transition: transform 0.15s ease;
-}
-details.dom-details[open] > summary::before {
-  transform: rotate(90deg);
-}
-.dom-children {
-  border-left: 1px dashed rgba(255, 255, 255, 0.08);
-  margin-left: 6px;
-  padding-left: 8px;
-}
-.dom-tag {
-  color: #f43f5e;
-  font-weight: 500;
-}
-.dom-attr-name {
-  color: #fb923c;
-}
-.dom-attr-val {
-  color: #22c55e;
-}
-.dom-text {
-  color: var(--text1);
-  font-family: 'Inter', sans-serif;
-  font-size: 0.88rem;
-  margin: 0 4px;
-  background: rgba(255, 255, 255, 0.02);
-  padding: 0px 4px;
-  border-radius: 3px;
-}
-.dom-closing {
-  padding-left: 14px;
-  color: var(--text2);
-}
-details.dom-details:not([open]) > summary .dom-ellipsis {
-  display: inline;
-  background: rgba(255, 255, 255, 0.08);
-  padding: 0 4px;
-  border-radius: 3px;
-  font-size: 0.75rem;
-  color: var(--accent2);
-}
-.dom-ellipsis {
-  display: none;
-}
 </style>
 </head>
 <body>
@@ -952,7 +832,6 @@ details.dom-details:not([open]) > summary .dom-ellipsis {
     <div class="tab" data-tab="flow">🔀 Flow</div>
     <div class="tab" data-tab="raw">🌐 Raw HTML</div>
     <div class="tab" data-tab="markdown">📝 Markdown</div>
-    <div class="tab" data-tab="structure">🏗️ Structure MD</div>
   </div>
 </div>
 
@@ -982,13 +861,7 @@ details.dom-details:not([open]) > summary .dom-ellipsis {
         <div class="spinner"></div>
         <div>Loading extracted content...</div>
       </div>
-      <!-- Mode Toggle -->
-      <div class="mode-toggle-wrap" style="display: flex; gap: 8px; margin-bottom: 24px; border-bottom: 1px solid var(--border); padding-bottom: 12px;">
-        <button class="h-btn active" id="btn-mode-flat" onclick="switchContentMode('flat')">📄 Flat Sections</button>
-        <button class="h-btn" id="btn-mode-hierarchical" onclick="switchContentMode('hierarchical')">🌳 Hierarchical Areas</button>
-      </div>
       <div id="content-sections"></div>
-      <div id="hierarchical-areas-view" style="display: none;"></div>
     </div>
 
     <!-- Assets Tab -->
@@ -1015,15 +888,6 @@ details.dom-details:not([open]) > summary .dom-ellipsis {
       </div>
       <div class="md-content" id="md-rendered"></div>
     </div>
-
-    <!-- Structure Tab -->
-    <div class="tab-panel" id="panel-structure">
-      <div class="md-toolbar">
-        <button class="h-btn" onclick="copyStructureMarkdown()">📋 Copy Structure</button>
-        <button class="h-btn" onclick="downloadStructureMD()">📥 Download structure.md</button>
-      </div>
-      <div class="md-content" id="structure-rendered"></div>
-    </div>
   </div>
 </div>
 
@@ -1040,7 +904,6 @@ details.dom-details:not([open]) > summary .dom-ellipsis {
 const SNAP_ID = '{{SNAP_ID}}';
 let extractedData = null;
 let markdownContent = '';
-let structureMarkdownContent = '';
 let snapInfo = null;
 
 // ── Init ──
@@ -1056,7 +919,7 @@ document.addEventListener('DOMContentLoaded', async () => {
       document.getElementById('panel-' + tab.dataset.tab).classList.add('active');
       // Show/hide sidebar based on tab
       const sb = document.getElementById('sidebar');
-      sb.style.display = ['content','markdown','structure'].includes(tab.dataset.tab) ? '' : 'none';
+      sb.style.display = ['content','markdown'].includes(tab.dataset.tab) ? '' : 'none';
       // Load raw iframe on demand
       if (tab.dataset.tab === 'raw' && snapInfo) {
         const iframe = document.getElementById('raw-iframe');
@@ -1067,20 +930,22 @@ document.addEventListener('DOMContentLoaded', async () => {
     });
   });
 
-  await loadSnapInfo();
-  await loadExtractedData();
-  await loadMarkdown();
-  await loadStructureMarkdown();
-  await loadAssets();
-  await loadFlow();
+  await Promise.all([
+    loadSnapInfo(),
+    loadExtractedData(),
+    loadMarkdown(),
+    loadAssets(),
+    loadFlow()
+  ]);
 });
 
 // ── Load snap info ──
 async function loadSnapInfo() {
   try {
-    const res = await fetch('/__archive__/api/snapshots');
-    const snaps = await res.json();
-    snapInfo = snaps.find(s => s.id === SNAP_ID);
+    // Use fast single-snapshot endpoint instead of fetching all snapshots
+    const res = await fetch(`/__archive__/api/snapshot/${SNAP_ID}`);
+    if (!res.ok) throw new Error('Snapshot not found');
+    snapInfo = await res.json();
     if (snapInfo) {
       const cleanDomain = snapInfo.domain.replace(/_/g, ':');
       document.getElementById('hdr-title').textContent = snapInfo.title || snapInfo.url;
@@ -1113,334 +978,11 @@ async function loadExtractedData() {
     extractedData = await res.json();
     loading.style.display = 'none';
     renderContent(extractedData);
-    renderHierarchicalAreas(extractedData);
     renderTOC(extractedData);
     renderBanner(extractedData);
   } catch(e) {
     loading.style.display = 'none';
     sections.innerHTML = `<div class="empty-state"><div class="icon">⚠️</div><h2>Error loading data</h2><p>${e.message}</p></div>`;
-  }
-}
-
-let currentContentMode = 'flat';
-
-function switchContentMode(mode) {
-  currentContentMode = mode;
-  const btnFlat = document.getElementById('btn-mode-flat');
-  const btnHier = document.getElementById('btn-mode-hierarchical');
-  const flatView = document.getElementById('content-sections');
-  const hierView = document.getElementById('hierarchical-areas-view');
-  
-  if (mode === 'flat') {
-    btnFlat.classList.add('active');
-    btnHier.classList.remove('active');
-    flatView.style.display = 'block';
-    hierView.style.display = 'none';
-  } else {
-    btnFlat.classList.remove('active');
-    btnHier.classList.add('active');
-    flatView.style.display = 'none';
-    hierView.style.display = 'block';
-  }
-}
-
-function renderTreeRecursive(val) {
-  if (val === null || val === undefined) return '<span class="tree-val">null</span>';
-  
-  if (typeof val === 'object' && !Array.isArray(val)) {
-    let html = '<div class="tree-nested">';
-    for (const [k, v] of Object.entries(val)) {
-      if (v === null || v === undefined) continue;
-      
-      const isDict = typeof v === 'object' && !Array.isArray(v);
-      const isArr = Array.isArray(v);
-      
-      if (isDict) {
-        html += `<details open><summary><span class="tree-key-dict">${escapeHtml(k)}</span></summary>${renderTreeRecursive(v)}</details>`;
-      } else if (isArr) {
-        html += `<details open><summary><span class="tree-key-list">${escapeHtml(k)} [${v.length}]</span></summary>`;
-        html += `<div class="tree-nested-list">`;
-        v.forEach(item => {
-          html += `<div class="tree-list-item">${renderTreeRecursive(item)}</div>`;
-        });
-        html += `</div></details>`;
-      } else {
-        const vStr = String(v);
-        if (k.endsWith('_src') || k.endsWith('_local') || k === 'icon_src') {
-          let src = vStr;
-          if (!src.startsWith('http') && !src.startsWith('data:')) {
-            src = `/__asset/${SNAP_ID}/${src}`;
-          }
-          html += `<div><span class="tree-key">${escapeHtml(k)}</span>: <img class="tree-img-thumb" src="${escapeHtml(src)}" onclick="openLightbox('${escapeHtml(src)}')"> <span class="tree-val">${escapeHtml(vStr)}</span></div>`;
-        } else if (k.endsWith('_href') || k === 'href') {
-          html += `<div><span class="tree-key">${escapeHtml(k)}</span>: <a href="${escapeHtml(vStr)}" target="_blank" class="tree-val">${escapeHtml(vStr)}</a></div>`;
-        } else {
-          html += `<div><span class="tree-key">${escapeHtml(k)}</span>: <span class="tree-val">${escapeHtml(vStr)}</span></div>`;
-        }
-      }
-    }
-    html += '</div>';
-    return html;
-  }
-  
-  if (Array.isArray(val)) {
-    let html = '<div class="tree-nested-list">';
-    val.forEach(item => {
-      html += `<div class="tree-list-item">${renderTreeRecursive(item)}</div>`;
-    });
-    html += '</div>';
-    return html;
-  }
-  
-  return `<span class="tree-val">${escapeHtml(String(val))}</span>`;
-}
-
-function renderHierarchicalAreas(data) {
-  const container = document.getElementById('hierarchical-areas-view');
-  if (!container) return;
-
-  const ha = data.content && data.content.hierarchical_areas ? data.content.hierarchical_areas : null;
-  if (!ha) {
-    container.innerHTML = '<div class="empty-state"><div class="icon">🌳</div><h2>No hierarchical areas found</h2><p>Try re-extracting this page.</p></div>';
-    return;
-  }
-
-  // Support both old array format and new dictionary format
-  if (typeof ha === 'object' && ha.html !== undefined) {
-    const cleanHtml = ha.html || '';
-    
-    // Render the beautiful tabbed panel
-    container.innerHTML = `
-      <div class="ha-tabs" style="display:flex; gap:8px; margin-bottom:16px;">
-        <button class="h-btn active" id="btn-ha-visual" onclick="toggleHAMode('visual')">👁️ Visual Structure</button>
-        <button class="h-btn" id="btn-ha-code" onclick="toggleHAMode('code')">🌳 Interactive HTML Tree</button>
-      </div>
-      
-      <div id="ha-visual-panel">
-        <iframe id="ha-iframe" src="/__asset/${SNAP_ID}/hierarchical_areas.html" style="width:100%; height:700px; border:1px solid var(--border); border-radius:var(--radius); background:var(--bg2);" sandbox="allow-same-origin"></iframe>
-      </div>
-      
-      <div id="ha-code-panel" style="display:none;">
-        <div class="dom-tree-container" id="ha-dom-tree" style="background:var(--panel2); border:1px solid var(--border); border-radius:var(--radius); padding:20px; max-height:700px; overflow-y:auto; overflow-x:auto; font-family:'JetBrains Mono',monospace; font-size:0.85rem; line-height:1.5; color:var(--text2);">
-          Loading interactive HTML tree...
-        </div>
-      </div>
-    `;
-
-    // Add iframe loaded style injection
-    const iframe = document.getElementById('ha-iframe');
-    if (iframe) {
-      iframe.onload = () => {
-        try {
-          const doc = iframe.contentDocument || iframe.contentWindow.document;
-          const style = doc.createElement('style');
-          style.innerHTML = `
-            body {
-              font-family: 'Inter', system-ui, sans-serif;
-              color: #f1f5f9;
-              background: #08090f;
-              padding: 24px;
-              line-height: 1.6;
-              max-width: 1000px;
-              margin: 0 auto;
-            }
-            h1, h2, h3, h4, h5, h6 {
-              font-family: 'Outfit', sans-serif;
-              margin-top: 20px;
-              margin-bottom: 10px;
-              color: #a78bfa;
-            }
-            p {
-              margin-bottom: 12px;
-              color: #cbd5e1;
-            }
-            a {
-              color: #38bdf8;
-              text-decoration: none;
-            }
-            a:hover {
-              text-decoration: underline;
-            }
-            img {
-              max-width: 150px;
-              max-height: 150px;
-              object-fit: contain;
-              border-radius: 6px;
-              margin: 8px 0;
-              border: 1px solid rgba(255,255,255,0.1);
-              display: block;
-            }
-            div {
-              border: 1px dashed rgba(139, 92, 246, 0.2);
-              padding: 10px;
-              margin: 8px 0;
-              border-radius: 6px;
-              background: rgba(139, 92, 246, 0.01);
-            }
-            ul, ol {
-              margin: 8px 0 8px 20px;
-              color: #cbd5e1;
-            }
-            li {
-              margin-bottom: 4px;
-            }
-            table {
-              width: 100%;
-              border-collapse: collapse;
-              margin: 12px 0;
-            }
-            th, td {
-              border: 1px solid rgba(255,255,255,0.1);
-              padding: 6px 10px;
-              text-align: left;
-            }
-            th {
-              background: #111422;
-            }
-          `;
-          doc.head.appendChild(style);
-        } catch (e) {
-          console.error("Failed to inject style into iframe: ", e);
-        }
-      };
-    }
-
-    // Parse clean HTML string and build interactive DOM tree view
-    try {
-      let htmlToParse = cleanHtml.trim();
-      if (htmlToParse.toLowerCase().startsWith('<body')) {
-        const firstClose = htmlToParse.indexOf('>');
-        const lastOpen = htmlToParse.toLowerCase().lastIndexOf('</body');
-        if (firstClose !== -1 && lastOpen !== -1) {
-          htmlToParse = htmlToParse.substring(firstClose + 1, lastOpen);
-        }
-      }
-
-      const parser = new DOMParser();
-      const doc = parser.parseFromString(htmlToParse, 'text/html');
-      const domTree = document.getElementById('ha-dom-tree');
-      if (domTree) {
-        const topLevelNodes = Array.from(doc.body.childNodes).filter(child => {
-          if (child.nodeType === 3) { // Node.TEXT_NODE
-            return child.nodeValue.trim().length > 0;
-          }
-          return child.nodeType === 1; // Node.ELEMENT_NODE
-        });
-        
-        let treeHtml = '';
-        if (topLevelNodes.length === 0) {
-          treeHtml = '<div class="empty-state">No elements in body</div>';
-        } else {
-          topLevelNodes.forEach(node => {
-            treeHtml += renderDOMTreeRecursive(node);
-          });
-        }
-        domTree.innerHTML = treeHtml;
-      }
-    } catch (e) {
-      console.error("Failed to parse clean HTML for interactive tree: ", e);
-      const domTree = document.getElementById('ha-dom-tree');
-      if (domTree) {
-        domTree.innerHTML = `<span style="color:var(--red)">Failed to render tree: ${escapeHtml(e.message)}</span>`;
-      }
-    }
-    return;
-  }
-
-  // Fallback to old array format if present
-  if (Array.isArray(ha)) {
-    let html = '';
-    ha.forEach((area, i) => {
-      html += `<div class="content-section" style="margin-bottom: 24px; border-left: 3px solid var(--accent); padding-left: 16px;">`;
-      const tag = area.element || 'div';
-      const cls = area.class ? ` class="${area.class}"` : '';
-      const eid = area.id ? ` id="${area.id}"` : '';
-      html += `<div style="font-family: monospace; font-size: 0.85rem; color: var(--text3); margin-bottom: 12px; background: #1e293b; padding: 4px 8px; border-radius: 4px; display: inline-block;">`;
-      html += `&lt;${tag}${cls}${eid}&gt;`;
-      html += `</div>`;
-      html += renderTreeRecursive(area.data);
-      html += `</div>`;
-    });
-    container.innerHTML = html;
-  }
-}
-
-function renderDOMTreeRecursive(node) {
-  if (node.nodeType === Node.TEXT_NODE) {
-    const text = node.nodeValue.trim();
-    if (!text) return '';
-    return `<span class="dom-text">${escapeHtml(text)}</span>`;
-  }
-  
-  if (node.nodeType !== Node.ELEMENT_NODE) {
-    return '';
-  }
-
-  const tagName = node.tagName.toLowerCase();
-  
-  // Build attributes string
-  let attrsHtml = '';
-  for (let i = 0; i < node.attributes.length; i++) {
-    const attr = node.attributes[i];
-    attrsHtml += ` <span class="dom-attr-name">${escapeHtml(attr.name)}</span>=<span class="dom-attr-val">"${escapeHtml(attr.value)}"</span>`;
-  }
-
-  const childNodes = Array.from(node.childNodes).filter(child => {
-    if (child.nodeType === Node.TEXT_NODE) {
-      return child.nodeValue.trim().length > 0;
-    }
-    return child.nodeType === Node.ELEMENT_NODE;
-  });
-
-  if (childNodes.length === 0) {
-    // Self-closing or empty tag
-    if (['img', 'br', 'hr', 'input'].includes(tagName)) {
-      return `<div class="dom-line">&lt;<span class="dom-tag">${tagName}</span>${attrsHtml}/&gt;</div>`;
-    }
-    return `<div class="dom-line">&lt;<span class="dom-tag">${tagName}</span>${attrsHtml}&gt;&lt;/<span class="dom-tag">${tagName}</span>&gt;</div>`;
-  }
-
-  // If it has only one text child, render it on a single line!
-  if (childNodes.length === 1 && childNodes[0].nodeType === Node.TEXT_NODE) {
-    const text = childNodes[0].nodeValue.trim();
-    return `<div class="dom-line">&lt;<span class="dom-tag">${tagName}</span>${attrsHtml}&gt;<span class="dom-text">${escapeHtml(text)}</span>&lt;/<span class="dom-tag">${tagName}</span>&gt;</div>`;
-  }
-
-  // Recursive tree with details/summary (collapsible)
-  let childrenHtml = '<div class="dom-children">';
-  childNodes.forEach(child => {
-    childrenHtml += renderDOMTreeRecursive(child);
-  });
-  childrenHtml += '</div>';
-
-  return `
-    <details class="dom-details" open>
-      <summary class="dom-summary">
-        &lt;<span class="dom-tag">${tagName}</span>${attrsHtml}&gt;
-        <span class="dom-ellipsis">...</span>
-      </summary>
-      ${childrenHtml}
-      <div class="dom-closing">&lt;/<span class="dom-tag">${tagName}</span>&gt;</div>
-    </details>
-  `;
-}
-
-function toggleHAMode(mode) {
-  const btnVisual = document.getElementById('btn-ha-visual');
-  const btnCode = document.getElementById('btn-ha-code');
-  const panelVisual = document.getElementById('ha-visual-panel');
-  const panelCode = document.getElementById('ha-code-panel');
-  
-  if (mode === 'visual') {
-    btnVisual.classList.add('active');
-    btnCode.classList.remove('active');
-    panelVisual.style.display = 'block';
-    panelCode.style.display = 'none';
-  } else {
-    btnVisual.classList.remove('active');
-    btnCode.classList.add('active');
-    panelVisual.style.display = 'none';
-    panelCode.style.display = 'block';
   }
 }
 
@@ -1521,7 +1063,7 @@ function renderTextContent(text) {
 }
 
 function renderImage(img) {
-  let src = img.local_path || img.src || img.url || img;
+  let src = img.src || img.url || img;
   if (typeof src === 'string' && !src.startsWith('http') && !src.startsWith('data:')) {
     src = `/__asset/${SNAP_ID}/${src}`;
   }
@@ -1603,25 +1145,6 @@ async function loadMarkdown() {
     }
   } catch(e) {
     document.getElementById('md-rendered').innerHTML = `<p style="color:var(--red)">Error: ${e.message}</p>`;
-  }
-}
-
-async function loadStructureMarkdown() {
-  try {
-    const res = await fetch(`/__archive__/api/structure/${SNAP_ID}`);
-    if (res.ok) {
-      structureMarkdownContent = await res.text();
-      if (typeof marked !== 'undefined') {
-        marked.setOptions({ breaks: true, gfm: true });
-        document.getElementById('structure-rendered').innerHTML = marked.parse(structureMarkdownContent);
-      } else {
-        document.getElementById('structure-rendered').innerHTML = `<pre>${escapeHtml(structureMarkdownContent)}</pre>`;
-      }
-    } else {
-      document.getElementById('structure-rendered').innerHTML = '<div class="empty-state"><div class="icon">🏗️</div><h2>No structure markdown</h2><p>Extract the snapshot first to generate structure markdown.</p></div>';
-    }
-  } catch(e) {
-    document.getElementById('structure-rendered').innerHTML = `<p style="color:var(--red)">Error: ${e.message}</p>`;
   }
 }
 
@@ -1772,14 +1295,6 @@ function copyMarkdown() {
   if (!markdownContent) { toast('No markdown to copy', 'error'); return; }
   navigator.clipboard.writeText(markdownContent).then(() => toast('📋 Copied to clipboard!', 'success'));
 }
-function downloadStructureMD() {
-  if (!structureMarkdownContent) { toast('No structure markdown to download', 'error'); return; }
-  downloadBlob(structureMarkdownContent, `${SNAP_ID}_structure.md`, 'text/markdown');
-}
-function copyStructureMarkdown() {
-  if (!structureMarkdownContent) { toast('No structure markdown to copy', 'error'); return; }
-  navigator.clipboard.writeText(structureMarkdownContent).then(() => toast('📋 Copied to clipboard!', 'success'));
-}
 function downloadBlob(content, name, type) {
   const a = document.createElement('a');
   a.href = URL.createObjectURL(new Blob([content], {type}));
@@ -1918,26 +1433,34 @@ class WaybackServer:
                     except Exception:
                         self._404(path)
                         return
-                    # Anti-Loop Mechanism: Detects A->B->A or self-reload loops
-                    import time
-                    if not hasattr(self.server, 'nav_history'):
-                        self.server.nav_history = {}
-                        
-                    # Use the base URL for tracking to catch query-param loops
-                    client_ip = self.client_address[0]
-                    history_key = f"{client_ip}_{base_url}"
-                    now = time.time()
-                    
-                    history = self.server.nav_history.get(history_key, [])
-                    history = [t for t in history if now - t < 5]
-                    history.append(now)
-                    self.server.nav_history[history_key] = history
-                    
-                    # If more than 4 requests in 5 seconds to the EXACT same base URL, it's a runaway loop
-                    if len(history) > 4:
-                        log("WARN", f"Blocked infinite redirect/reload loop for {client_ip} at {url}")
+                    # Guard: reject localhost self-referral URLs immediately
+                    # (these occur when the SW incorrectly routes local resources)
+                    if base_url.startswith("http://localhost") or base_url.startswith("https://localhost") or \
+                       base_url.startswith("http://127.0.0.1") or base_url.startswith("https://127.0.0.1"):
                         self._send(204, "text/plain", b"")
                         return
+
+                    # Anti-Loop Mechanism: Detects A->B->A or self-reload loops (only for HTML document requests)
+                    is_html_request = "text/html" in self.headers.get("Accept", "")
+                    if is_html_request:
+                        if not hasattr(self.server, 'nav_history'):
+                            self.server.nav_history = {}
+                            
+                        # Use the base URL for tracking to catch query-param loops
+                        client_ip = self.client_address[0]
+                        history_key = f"{client_ip}_{base_url}"
+                        now = time.time()
+                        
+                        history = self.server.nav_history.get(history_key, [])
+                        history = [t for t in history if now - t < 5]
+                        history.append(now)
+                        self.server.nav_history[history_key] = history
+                        
+                        # If more than 4 requests in 5 seconds to the EXACT same base URL, it's a runaway loop
+                        if len(history) > 4:
+                            log("WARN", f"Blocked infinite redirect/reload loop for {client_ip} at {url}")
+                            self._send(204, "text/plain", b"")
+                            return
 
                     self._serve_url(url)
 
@@ -2031,6 +1554,19 @@ class WaybackServer:
                     self._send(200, "application/json", body,
                                extra_headers={"Cache-Control": "no-store"})
 
+                # ── Single snapshot info ───────────────────────────────────
+                elif sub.startswith("snapshot/"):
+                    snap_id = sub[len("snapshot/"):].split("?")[0]
+                    snap, snap_path = self._find_snap(snap_id)
+                    if not snap:
+                        self._send(404, "application/json", json.dumps({"error": "Snapshot not found"}).encode())
+                        return
+                    snap_copy = dict(snap)
+                    snap_copy["has_extracted"] = (snap_path / "extracted_data.json").exists()
+                    body = json.dumps(snap_copy).encode()
+                    self._send(200, "application/json", body,
+                               extra_headers={"Cache-Control": "no-store"})
+
                 elif sub.startswith("search?"):
                     q = urllib.parse.parse_qs(sub[7:]).get("q", [""])[0]
                     body = json.dumps(archive.search(q)).encode()
@@ -2060,20 +1596,6 @@ class WaybackServer:
                     md_file = snap_path / "content.md"
                     if not md_file.exists():
                         self._send(404, "text/plain", b"No markdown content")
-                        return
-                    body = md_file.read_bytes()
-                    self._send(200, "text/markdown; charset=utf-8", body)
-
-                # ── Structure markdown API ─────────────────────────────
-                elif sub.startswith("structure/"):
-                    snap_id = sub[len("structure/"):].split("?")[0]
-                    snap, snap_path = self._find_snap(snap_id)
-                    if not snap:
-                        self._send(404, "text/plain", b"Snapshot not found")
-                        return
-                    md_file = snap_path / "structure.md"
-                    if not md_file.exists():
-                        self._send(404, "text/plain", b"No structure markdown")
                         return
                     body = md_file.read_bytes()
                     self._send(200, "text/markdown; charset=utf-8", body)
@@ -2161,7 +1683,7 @@ class WaybackServer:
                     extractor = ContentExtractor(snap_path)
                     data = extractor.extract()
                     self._send(200, "application/json",
-                               json.dumps({"status": "ok", "snap_id": snap_id, "sections": len(data.get("content", {}).get("sections", []))}).encode())
+                               json.dumps({"status": "ok", "snap_id": snap_id, "sections": len(data.get("sections", []))}).encode())
                 except Exception as e:
                     log("ERR", f"Extraction failed for {snap_id}: {e}")
                     self._send(500, "application/json",
@@ -2464,6 +1986,45 @@ class WaybackServer:
                     except Exception as e:
                         log("WARN", f"Failed to serve redirect route {rel_path}: {e}")
 
+
+                if rel_path and rel_path.startswith("api:"):
+                    try:
+                        filepath = archive.root / rel_path[4:]
+                        if filepath.exists():
+                            api_data = json.loads(filepath.read_text(encoding="utf-8"))
+                            resp = api_data.get("response", {})
+                            status = resp.get("status", 200)
+                            headers = resp.get("headers", {})
+                            body_str = resp.get("body", "")
+                            
+                            # Case-insensitive headers lookup for content-type
+                            ct = "application/json; charset=utf-8"
+                            for k, v in headers.items():
+                                if k.lower() == "content-type":
+                                    ct = v
+                                    break
+                            
+                            if isinstance(body_str, (dict, list)):
+                                body_str = json.dumps(body_str)
+                            body = body_str.encode("utf-8", errors="replace")
+                            
+                            if "html" in ct.lower():
+                                try:
+                                    t_script = _get_tokens_script(url)
+                                    # Rewrite HTML content in API response (e.g. swap lazy loaded images)
+                                    body_str = rewrite_html(body_str, all_routes, url, tokens_script=t_script, is_final_page=False)
+                                    body = body_str.encode("utf-8", errors="replace")
+                                except Exception as e:
+                                    log("WARN", f"Failed rewriting API HTML: {e}")
+                                    
+                            self._send(status, ct, body, extra_headers={
+                                "X-WR-Source": rel_path[4:],
+                                "X-WR-OrigURL": url,
+                            })
+                            return
+                    except Exception as e:
+                        log("WARN", f"Failed to serve API route {rel_path}: {e}")
+
                 if not rel_path:
                     self._archive_not_found(url)
                     return
@@ -2528,32 +2089,41 @@ class WaybackServer:
                 
                 # Rewrite CSS links → /__wb/...
                 elif "css" in ct:
-                    try:
-                        text = safe_decode(content)
-                        text = rewrite_css(text, all_routes, matched_url)
-                        content = text.encode("utf-8")
-                    except Exception:
-                        pass
+                    cached = _cache_get(filepath)
+                    if cached is not None:
+                        content = cached
+                    else:
+                        try:
+                            text = safe_decode(content)
+                            text = rewrite_css(text, all_routes, matched_url)
+                            content = text.encode("utf-8")
+                            _cache_put(filepath, content)
+                        except Exception:
+                            pass
 
                 # Rewrite JS links
                 elif ct in ("application/javascript", "text/javascript"):
-                    try:
-                        text = safe_decode(content)
-                        text = rewrite_css(text, all_routes, matched_url)  # Reuse CSS rewriter for url() in JS
-                        
-                        # Rewrite location properties to support SPA routing inside wayback proxy
-                        text = re.sub(r'\bwindow\.location\.pathname\b', 'window.__wr_path()', text)
-                        text = re.sub(r'(?<!window\.)\blocation\.pathname\b', '(window.__wr_path?window.__wr_path():location.pathname)', text)
-                        text = re.sub(r'\bwindow\.location\.href\b', 'window.__wr_href()', text)
-                        text = re.sub(r'(?<!window\.)\blocation\.href\b', '(window.__wr_href?window.__wr_href():location.href)', text)
-                        
-                        # FIX: Force lazy images in JS (like Reddit avatars) to scale properly and load eagerly
-                        text = re.sub(r'(<img\b[^>]*?)loading=["\']?lazy["\']?', r'\1loading="eager" style="width:100%;height:100%;object-fit:cover;"', text, flags=re.IGNORECASE)
-                        text = re.sub(r'(<faceplate-img\b[^>]*?)loading=["\']?lazy["\']?', r'\1loading="eager"', text, flags=re.IGNORECASE)
-                        
-                        content = text.encode("utf-8")
-                    except Exception:
-                        pass
+                    cached = _cache_get(filepath)
+                    if cached is not None:
+                        content = cached
+                    else:
+                        try:
+                            text = safe_decode(content)
+                            text = rewrite_css(text, all_routes, matched_url)  # Reuse CSS rewriter for url() in JS
+
+                            from src.rewriter import rewrite_js
+                            text = rewrite_js(text)
+
+
+                            # FIX: Force lazy images in JS (like Reddit avatars) to scale properly and load eagerly
+                            text = re.sub(r'(<img\b[^>]*?)loading=["\']?lazy["\']?', r'\1loading="eager" style="width:100%;height:100%;object-fit:cover;"', text, flags=re.IGNORECASE)
+                            text = re.sub(r'(<faceplate-img\b[^>]*?)loading=["\']?lazy["\']?', r'\1loading="eager"', text, flags=re.IGNORECASE)
+
+                            content = text.encode("utf-8")
+                            _cache_put(filepath, content)
+                        except Exception:
+                            pass
+
 
                 # Append charset=utf-8 for text-based resources to prevent browser encoding guess failures
                 if ct and any(t in ct for t in ("text/html", "text/css", "javascript", "json")):
@@ -2567,9 +2137,9 @@ class WaybackServer:
                     "Cache-Control": "public, max-age=3600" if ("html" not in ct and "css" not in ct) else "no-cache",
                 }
                 
-                # Add Sandbox CSP to prevent JS from auto-refreshing or auto-redirecting (stops WAF loops)
+                # Add Sandbox CSP to prevent JS from auto-refreshing (stops WAF loops) but allow top-level redirects
                 if "html" in ct:
-                    extra_hdrs["Content-Security-Policy"] = "sandbox allow-scripts allow-same-origin allow-popups allow-forms allow-top-navigation-by-user-activation allow-modals"
+                    extra_hdrs["Content-Security-Policy"] = "sandbox allow-scripts allow-same-origin allow-popups allow-forms allow-top-navigation allow-top-navigation-by-user-activation allow-modals"
 
                 self._send(200, ct, content, extra_headers=extra_hdrs)
 
@@ -2593,8 +2163,10 @@ a{{color:#7c3aed}}h1{{font-size:2rem}}p{{color:#8b949e}}</style></head>
                 self.send_header("Access-Control-Allow-Origin", "*")
                 if extra_headers:
                     for k, v in extra_headers.items():
-                        try: self.send_header(k, v)
-                        except: pass
+                        try:
+                            self.send_header(k, v)
+                        except (OSError, IOError, Exception):
+                            pass
                 self.end_headers()
                 self.wfile.write(body)
 

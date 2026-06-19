@@ -140,6 +140,13 @@ class ArchiveIndex:
                 else:
                     routes[url] = str(Path(snap["path"]) / rel).replace("\\", "/")
 
+            # Include recorded API calls so the Service Worker knows they are archived
+            for entry in mf.get("api_calls", []):
+                url = entry.get("url")
+                eid = entry.get("id")
+                if url and eid:
+                    routes[url] = f"api:{snap['path']}/api_responses/{eid}.json"
+
         # WAF Bypass: Cloudflare redirects to ?solution=...&js_challenge=1 when solved,
         # and returns the real page on that URL. We map the clean base URL to the real page.
         waf_mapping = {}
@@ -158,7 +165,22 @@ class ArchiveIndex:
             if "url" in snap:
                 final_page_path = self.root / snap["path"] / "final_page.html"
                 if final_page_path.exists():
-                    routes[snap["url"]] = str(Path(snap["path"]) / "final_page.html").replace("\\", "/")
+                    fp_rel = str(Path(snap["path"]) / "final_page.html").replace("\\", "/")
+                    routes[snap["url"]] = fp_rel
+                    # Also map the www./non-www alias so that redirect targets also serve final_page
+                    # e.g. recorded as https://qimao.com/ but redirects to https://www.qimao.com/
+                    parsed_snap_url = urllib.parse.urlparse(snap["url"])
+                    netloc = parsed_snap_url.netloc
+                    if netloc.startswith("www."):
+                        alias_netloc = netloc[4:]  # www.example.com → example.com
+                    else:
+                        alias_netloc = "www." + netloc  # example.com → www.example.com
+                    alias_url = urllib.parse.urlunparse((
+                        parsed_snap_url.scheme, alias_netloc,
+                        parsed_snap_url.path, "", "", ""
+                    ))
+                    routes[alias_url] = fp_rel
+
 
         self._routes_cache = routes
         return routes
